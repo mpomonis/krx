@@ -45,8 +45,7 @@ distribution):
 	[2] Setup the `as' wrapper
 		sudo mv /usr/bin/as /usr/bin/as.old && sudo ln -s $REPO_DIR/src/utils/as_wrapper.sh /usr/bin/as
 	
-	[3] Configure the kernel (in this example we use `config-3.19-amd64.krx.deb'
-which is similar to the default Debian config file)
+	[3] Configure the kernel (in this example we use `config-3.19-amd64.krx.deb' which is similar to the default Debian config file)
 		cp $REPO_DIR/src/configs/config-3.19-amd64.krx.deb ./.config
 		make oldconfig
 	
