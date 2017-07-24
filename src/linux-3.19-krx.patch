@@ -1,0 +1,4227 @@
+diff -uprN linux-3.19/arch/x86/boot/compressed/misc.c linux-3.19-krx/arch/x86/boot/compressed/misc.c
+--- linux-3.19/arch/x86/boot/compressed/misc.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/boot/compressed/misc.c	2017-07-23 16:03:46.116993397 -0400
+@@ -315,7 +315,7 @@ static inline void handle_relocations(vo
+ { }
+ #endif
+ 
+-static void parse_elf(void *output)
++static unsigned long parse_elf(void *output)
+ {
+ #ifdef CONFIG_X86_64
+ 	Elf64_Ehdr ehdr;
+@@ -326,6 +326,11 @@ static void parse_elf(void *output)
+ #endif
+ 	void *dest;
+ 	int i;
++#ifdef	CONFIG_KRX
++	Elf64_Xword size;
++	void *highest_addr = NULL;
++	void *prev_max = NULL;
++#endif
+ 
+ 	memcpy(&ehdr, output, sizeof(ehdr));
+ 	if (ehdr.e_ident[EI_MAG0] != ELFMAG0 ||
+@@ -355,6 +360,15 @@ static void parse_elf(void *output)
+ #else
+ 			dest = (void *)(phdr->p_paddr);
+ #endif
++#ifdef CONFIG_KRX
++			if (dest > output + phdr->p_offset)
++				error("The kernel image is corrupted");
++			if (prev_max != NULL && prev_max < dest)
++				memset(prev_max, 0, dest - prev_max);
++			size = phdr->p_filesz;
++			highest_addr = output + phdr->p_offset + size;
++			prev_max = dest + size;
++#endif
+ 			memcpy(dest,
+ 			       output + phdr->p_offset,
+ 			       phdr->p_filesz);
+@@ -362,8 +376,15 @@ static void parse_elf(void *output)
+ 		default: /* Ignore other PT_* */ break;
+ 		}
+ 	}
++#ifdef	CONFIG_KRX
++	/* erase all unzipped data higher than the image */
++	if (dest + size < highest_addr)
++		memset(dest + size, 0, highest_addr - dest - size);
++#endif
+ 
+ 	free(phdrs);
++	
++	return (unsigned long)ehdr.e_entry;
+ }
+ 
+ asmlinkage __visible void *decompress_kernel(void *rmode, memptr heap,
+@@ -374,6 +395,7 @@ asmlinkage __visible void *decompress_ke
+ 				  unsigned long run_size)
+ {
+ 	unsigned char *output_orig = output;
++	unsigned long entry_off;
+ 
+ 	real_mode = rmode;
+ 
+@@ -422,7 +444,7 @@ asmlinkage __visible void *decompress_ke
+ 
+ 	debug_putstr("\nDecompressing Linux... ");
+ 	decompress(input_data, input_len, NULL, NULL, output, NULL, error);
+-	parse_elf(output);
++	entry_off = (parse_elf(output) - LOAD_PHYSICAL_ADDR);
+ 	/*
+ 	 * 32-bit always performs relocations. 64-bit relocations are only
+ 	 * needed if kASLR has chosen a different load address.
+@@ -430,5 +452,5 @@ asmlinkage __visible void *decompress_ke
+ 	if (!IS_ENABLED(CONFIG_X86_64) || output != output_orig)
+ 		handle_relocations(output, output_len);
+ 	debug_putstr("done.\nBooting the kernel.\n");
+-	return output;
++	return output + entry_off;
+ }
+diff -uprN linux-3.19/arch/x86/ia32/ia32entry.S linux-3.19-krx/arch/x86/ia32/ia32entry.S
+--- linux-3.19/arch/x86/ia32/ia32entry.S	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/ia32/ia32entry.S	2017-07-23 16:03:47.676993456 -0400
+@@ -180,6 +180,10 @@ sysexit_from_sys_call:
+ 	andl    $~TS_COMPAT,TI_status+THREAD_INFO(%rsp,RIP-ARGOFFSET)
+ 	/* clear IF, that popfq doesn't enable interrupts early */
+ 	andl  $~0x200,EFLAGS-R11(%rsp) 
++#ifdef	CONFIG_MPX
++	movq __krx_edata,%rdx
++	bndmk 0x0(,%rcx,1),%bnd0
++#endif
+ 	movl	RIP-R11(%rsp),%edx		/* User %eip */
+ 	CFI_REGISTER rip,rdx
+ 	RESTORE_ARGS 0,24,0,0,0,0
+diff -uprN linux-3.19/arch/x86/include/asm/asm.h linux-3.19-krx/arch/x86/include/asm/asm.h
+--- linux-3.19/arch/x86/include/asm/asm.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/asm.h	2017-07-23 16:03:47.732993458 -0400
+@@ -55,7 +55,7 @@
+ 	.pushsection "__ex_table","a" ;				\
+ 	.balign 8 ;						\
+ 	.long (from) - . ;					\
+-	.long (to) - . + 0x7ffffff0 ;				\
++	.long (to) - . + 0x2ffffff0 ;				\
+ 	.popsection
+ 
+ # define _ASM_NOKPROBE(entry)					\
+@@ -75,7 +75,7 @@
+ 	" .pushsection \"__ex_table\",\"a\"\n"			\
+ 	" .balign 8\n"						\
+ 	" .long (" #from ") - .\n"				\
+-	" .long (" #to ") - . + 0x7ffffff0\n"			\
++	" .long (" #to ") - . + 0x2ffffff0\n"			\
+ 	" .popsection\n"
+ /* For C file, we already have NOKPROBE_SYMBOL macro */
+ #endif
+diff -uprN linux-3.19/arch/x86/include/asm/cacheflush.h linux-3.19-krx/arch/x86/include/asm/cacheflush.h
+--- linux-3.19/arch/x86/include/asm/cacheflush.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/cacheflush.h	2017-07-23 16:03:47.744993458 -0400
+@@ -43,7 +43,11 @@ int set_memory_x(unsigned long addr, int
+ int set_memory_nx(unsigned long addr, int numpages);
+ int set_memory_ro(unsigned long addr, int numpages);
+ int set_memory_rw(unsigned long addr, int numpages);
++int set_memory_p(unsigned long addr, int numpages);
+ int set_memory_np(unsigned long addr, int numpages);
++#ifdef CONFIG_KRX
++int _set_memory_np(unsigned long addr, int numpages);
++#endif
+ int set_memory_4k(unsigned long addr, int numpages);
+ 
+ int set_memory_array_uc(unsigned long *addr, int addrinarray);
+diff -uprN linux-3.19/arch/x86/include/asm/desc.h linux-3.19-krx/arch/x86/include/asm/desc.h
+--- linux-3.19/arch/x86/include/asm/desc.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/desc.h	2017-07-23 16:03:47.716993458 -0400
+@@ -511,4 +511,49 @@ static inline void load_current_idt(void
+ 	else
+ 		load_idt((const struct desc_ptr *)&idt_descr);
+ }
++
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_32)
++#include <linux/sched.h>
++static inline void krx_disable(void)
++{
++	unsigned short new_desc = __USER_DS_ORIG;
++	unsigned short *old_ds = &current->thread.old_ds;
++	unsigned short *old_es = &current->thread.old_es;
++	
++	asm (
++		"mov %%ds, %0\t\n"
++		"mov %%es, %1\t\n"
++		: "=r" (*old_ds),
++		  "=r" (*old_es)
++		:
++		:
++	);
++	
++	asm (
++		"mov %0, %%ds\t\n"
++		"mov %0, %%es\t\n"
++		:
++		: "r" (new_desc)
++		:
++	);
++}
++
++static inline void krx_enable(void)
++{
++	unsigned short *old_ds = &current->thread.old_ds;
++	unsigned short *old_es = &current->thread.old_es;
++	
++	asm (
++		"mov %0, %%ds\t\n"
++		"mov %1, %%es\t\n"
++		:
++		: "r" (*old_ds),
++		  "r" (*old_es)
++		:
++	);
++}
++#else
++static inline void krx_disable(void) { }
++static inline void krx_enable(void) { }
++#endif
+ #endif /* _ASM_X86_DESC_H */
+diff -uprN linux-3.19/arch/x86/include/asm/fixmap.h linux-3.19-krx/arch/x86/include/asm/fixmap.h
+--- linux-3.19/arch/x86/include/asm/fixmap.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/fixmap.h	2017-07-23 16:03:47.720993458 -0400
+@@ -41,9 +41,15 @@
+ extern unsigned long __FIXADDR_TOP;
+ #define FIXADDR_TOP	((unsigned long)__FIXADDR_TOP)
+ #else
++#ifdef	CONFIG_KRX
++#define FIXADDR_RELOC_DELTA	0x40000000UL
++#define FIXADDR_TOP	(round_up((VSYSCALL_ADDR - FIXADDR_RELOC_DELTA) + \
++			PAGE_SIZE, 1<<PMD_SHIFT) - PAGE_SIZE)
++#else
+ #define FIXADDR_TOP	(round_up(VSYSCALL_ADDR + PAGE_SIZE, 1<<PMD_SHIFT) - \
+ 			 PAGE_SIZE)
+ #endif
++#endif
+ 
+ 
+ /*
+@@ -70,8 +76,13 @@ enum fixed_addresses {
+ 	FIX_HOLE,
+ #else
+ #ifdef CONFIG_X86_VSYSCALL_EMULATION
++#ifdef CONFIG_KRX
++	VSYSCALL_PAGE = (FIXADDR_TOP - VSYSCALL_ADDR + \
++			FIXADDR_RELOC_DELTA) >> PAGE_SHIFT,
++#else
+ 	VSYSCALL_PAGE = (FIXADDR_TOP - VSYSCALL_ADDR) >> PAGE_SHIFT,
+ #endif
++#endif
+ #ifdef CONFIG_PARAVIRT_CLOCK
+ 	PVCLOCK_FIXMAP_BEGIN,
+ 	PVCLOCK_FIXMAP_END = PVCLOCK_FIXMAP_BEGIN+PVCLOCK_VSYSCALL_NR_PAGES-1,
+diff -uprN linux-3.19/arch/x86/include/asm/page_32.h linux-3.19-krx/arch/x86/include/asm/page_32.h
+--- linux-3.19/arch/x86/include/asm/page_32.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/page_32.h	2017-07-23 16:03:47.756993459 -0400
+@@ -5,7 +5,14 @@
+ 
+ #ifndef __ASSEMBLY__
+ 
+-#define __phys_addr_nodebug(x)	((x) - PAGE_OFFSET)
++#ifdef CONFIG_KRX
++#define __phys_addr_nodebug(x)		((x < __START_KERNEL_map) ?	\
++						(x - PAGE_OFFSET) : 	\
++						(x - __START_KERNEL_map))
++#define __phys_addr_nodebug_reloc(x)	((x) - __START_KERNEL_map)
++#else
++#define __phys_addr_nodebug(x)		((x) - PAGE_OFFSET)
++#endif
+ #ifdef CONFIG_DEBUG_VIRTUAL
+ extern unsigned long __phys_addr(unsigned long);
+ #else
+diff -uprN linux-3.19/arch/x86/include/asm/page_32_types.h linux-3.19-krx/arch/x86/include/asm/page_32_types.h
+--- linux-3.19/arch/x86/include/asm/page_32_types.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/page_32_types.h	2017-07-23 16:03:47.740993459 -0400
+@@ -15,7 +15,13 @@
+  */
+ #define __PAGE_OFFSET		_AC(CONFIG_PAGE_OFFSET, UL)
+ 
++#ifdef	CONFIG_KRX
++#define __START_KERNEL_map	_AC(0xf8000000, UL) 
++#else
+ #define __START_KERNEL_map	__PAGE_OFFSET
++#endif
++#define KERNEL_START		(__START_KERNEL_map + CONFIG_PHYSICAL_START)
++#define KERNEL_END		_AC(0xffffffff, UL)
+ 
+ #define THREAD_SIZE_ORDER	1
+ #define THREAD_SIZE		(PAGE_SIZE << THREAD_SIZE_ORDER)
+@@ -39,7 +45,11 @@
+ /*
+  * Kernel image size is limited to 512 MB (see in arch/x86/kernel/head_32.S)
+  */
+-#define KERNEL_IMAGE_SIZE	(512 * 1024 * 1024)
++#ifdef	CONFIG_KRX
++#define	KERNEL_IMAGE_SIZE	(128 * 1024 * 1024)
++#else
++#define	KERNEL_IMAGE_SIZE	(512 * 1024 * 1024)
++#endif
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff -uprN linux-3.19/arch/x86/include/asm/page_64_types.h linux-3.19-krx/arch/x86/include/asm/page_64_types.h
+--- linux-3.19/arch/x86/include/asm/page_64_types.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/page_64_types.h	2017-07-23 16:03:47.752993459 -0400
+@@ -31,7 +31,12 @@
+  */
+ #define __PAGE_OFFSET           _AC(0xffff880000000000, UL)
+ 
++#ifdef	CONFIG_KRX 
++#define __START_KERNEL_map	_AC(0xffffffffc0000000, UL)
++#define	KERNEL_END		_AC(0xffffffffffffffff, UL)
++#else
+ #define __START_KERNEL_map	_AC(0xffffffff80000000, UL)
++#endif
+ 
+ /* See Documentation/x86/x86_64/mm.txt for a description of the memory map. */
+ #define __PHYSICAL_MASK_SHIFT	46
+diff -uprN linux-3.19/arch/x86/include/asm/page.h linux-3.19-krx/arch/x86/include/asm/page.h
+--- linux-3.19/arch/x86/include/asm/page.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/page.h	2017-07-23 16:10:08.521007288 -0400
+@@ -52,6 +52,12 @@ static inline void copy_user_page(void *
+ 	__phys_addr_symbol(__phys_reloc_hide((unsigned long)(x)))
+ 
+ #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_32)
++#define __va_reloc(x)	\
++			((void *)((unsigned long)(x)+__START_KERNEL_map))
++#else
++#define __va_reloc(x)		__va(x)
++#endif
+ 
+ #define __boot_va(x)		__va(x)
+ #define __boot_pa(x)		__pa(x)
+diff -uprN linux-3.19/arch/x86/include/asm/page_types.h linux-3.19-krx/arch/x86/include/asm/page_types.h
+--- linux-3.19/arch/x86/include/asm/page_types.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/page_types.h	2017-07-23 16:03:47.744993458 -0400
+@@ -61,6 +61,11 @@ bool pfn_range_is_mapped(unsigned long s
+ extern unsigned long init_memory_mapping(unsigned long start,
+ 					 unsigned long end);
+ 
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_32)
++extern void init_krx_mapping(unsigned long start, unsigned long end);
++#else
++static inline void init_krx_mapping(unsigned long start, unsigned long end) { }
++#endif
+ extern void initmem_init(void);
+ 
+ #endif	/* !__ASSEMBLY__ */
+diff -uprN linux-3.19/arch/x86/include/asm/pgtable_32_types.h linux-3.19-krx/arch/x86/include/asm/pgtable_32_types.h
+--- linux-3.19/arch/x86/include/asm/pgtable_32_types.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/pgtable_32_types.h	2017-07-23 16:03:47.724993457 -0400
+@@ -28,6 +28,9 @@
+ 
+ #ifndef __ASSEMBLY__
+ extern bool __vmalloc_start_set; /* set once high_memory is set */
++#ifdef CONFIG_KRX
++extern unsigned long max_init_mapped;
++#endif
+ #endif
+ 
+ #define VMALLOC_START	((unsigned long)high_memory + VMALLOC_OFFSET)
+@@ -46,9 +49,18 @@ extern bool __vmalloc_start_set; /* set
+ # define VMALLOC_END	(FIXADDR_START - 2 * PAGE_SIZE)
+ #endif
+ 
++#ifdef	CONFIG_KRX
++#define MODULES_VADDR	(max_init_mapped + PAGE_SIZE)
++#define MODULES_END	_AC(0xfffff000, UL)
++#define MODULES_LEN	(MODULES_END - MODULES_VADDR)
++#define MODULES_DATA_VADDR	VMALLOC_START
++#define MODULES_DATA_END	VMALLOC_END
++#define MODULES_DATA_LEN	(MODULES_DATA_END - MODULES_DATA_VADDR)
++#else
+ #define MODULES_VADDR	VMALLOC_START
+ #define MODULES_END	VMALLOC_END
+-#define MODULES_LEN	(MODULES_VADDR - MODULES_END)
++#define MODULES_LEN	(MODULES_END - MODULES_VADDR)
++#endif
+ 
+ #define MAXMEM	(VMALLOC_END - PAGE_OFFSET - __VMALLOC_RESERVE)
+ 
+diff -uprN linux-3.19/arch/x86/include/asm/pgtable_64_types.h linux-3.19-krx/arch/x86/include/asm/pgtable_64_types.h
+--- linux-3.19/arch/x86/include/asm/pgtable_64_types.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/pgtable_64_types.h	2017-07-23 16:03:47.752993459 -0400
+@@ -60,7 +60,15 @@ typedef struct { pteval_t pte; } pte_t;
+ #define VMEMMAP_START	 _AC(0xffffea0000000000, UL)
+ #define MODULES_VADDR    (__START_KERNEL_map + KERNEL_IMAGE_SIZE)
+ #define MODULES_END      _AC(0xffffffffff000000, UL)
++#ifdef	CONFIG_KRX
+ #define MODULES_LEN   (MODULES_END - MODULES_VADDR)
++#define MODULES_RELOC_DELTA	0x40000000UL
++#define MODULES_DATA_VADDR	(__START_KERNEL_map - MODULES_RELOC_DELTA)
++#define MODULES_DATA_END	(FIXADDR_START - PAGE_SIZE)
++#define MODULES_DATA_LEN	(MODULES_DATA_END - MODULES_DATA_VADDR)
++#else
++#define MODULES_LEN		(MODULES_END - MODULES_VADDR)
++#endif
+ #define ESPFIX_PGD_ENTRY _AC(-2, UL)
+ #define ESPFIX_BASE_ADDR (ESPFIX_PGD_ENTRY << PGDIR_SHIFT)
+ #define EFI_VA_START	 ( -4 * (_AC(1, UL) << 30))
+diff -uprN linux-3.19/arch/x86/include/asm/pgtable_types.h linux-3.19-krx/arch/x86/include/asm/pgtable_types.h
+--- linux-3.19/arch/x86/include/asm/pgtable_types.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/pgtable_types.h	2017-07-23 16:03:47.716993458 -0400
+@@ -368,7 +368,7 @@ static inline pgprot_t cachemode2pgprot(
+ }
+ static inline enum page_cache_mode pgprot2cachemode(pgprot_t pgprot)
+ {
+-	unsigned long masked;
++	pgprotval_t masked;
+ 
+ 	masked = pgprot_val(pgprot) & _PAGE_CACHE_MASK;
+ 	if (likely(masked == 0))
+@@ -377,8 +377,8 @@ static inline enum page_cache_mode pgpro
+ }
+ static inline pgprot_t pgprot_4k_2_large(pgprot_t pgprot)
+ {
+-	pgprot_t new;
+-	unsigned long val;
++	pgprot_t	new;
++	pgprotval_t	val;
+ 
+ 	val = pgprot_val(pgprot);
+ 	pgprot_val(new) = (val & ~(_PAGE_PAT | _PAGE_PAT_LARGE)) |
+@@ -387,8 +387,8 @@ static inline pgprot_t pgprot_4k_2_large
+ }
+ static inline pgprot_t pgprot_large_2_4k(pgprot_t pgprot)
+ {
+-	pgprot_t new;
+-	unsigned long val;
++	pgprot_t	new;
++	pgprotval_t	val;
+ 
+ 	val = pgprot_val(pgprot);
+ 	pgprot_val(new) = (val & ~(_PAGE_PAT | _PAGE_PAT_LARGE)) |
+diff -uprN linux-3.19/arch/x86/include/asm/processor.h linux-3.19-krx/arch/x86/include/asm/processor.h
+--- linux-3.19/arch/x86/include/asm/processor.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/processor.h	2017-07-23 16:03:47.724993457 -0400
+@@ -475,12 +475,16 @@ struct thread_struct {
+ 	unsigned long		sysenter_cs;
+ #else
+ 	unsigned long		usersp;	/* Copy from PDA */
+-	unsigned short		es;
+-	unsigned short		ds;
+ 	unsigned short		fsindex;
+ 	unsigned short		gsindex;
+ #endif
++	unsigned short		es;
++	unsigned short		ds;
+ #ifdef CONFIG_X86_32
++#ifdef CONFIG_KRX
++	unsigned short		old_es;
++	unsigned short		old_ds;
++#endif
+ 	unsigned long		ip;
+ #endif
+ #ifdef CONFIG_X86_64
+diff -uprN linux-3.19/arch/x86/include/asm/segment.h linux-3.19-krx/arch/x86/include/asm/segment.h
+--- linux-3.19/arch/x86/include/asm/segment.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/include/asm/segment.h	2017-07-23 16:03:47.716993458 -0400
+@@ -113,6 +113,10 @@
+ #define __KERNEL_STACK_CANARY		0
+ #endif
+ 
++#ifdef CONFIG_KRX
++#define	GDT_ENTRY_USER_DS_ORIG		(29)
++#endif
++
+ #define GDT_ENTRY_DOUBLEFAULT_TSS	31
+ 
+ /*
+@@ -185,6 +189,9 @@
+ 
+ #define __KERNEL_CS	(GDT_ENTRY_KERNEL_CS*8)
+ #define __KERNEL_DS	(GDT_ENTRY_KERNEL_DS*8)
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_32)
++#define __USER_DS_ORIG	(GDT_ENTRY_USER_DS_ORIG*8+3)
++#endif
+ #define __USER_DS	(GDT_ENTRY_DEFAULT_USER_DS*8+3)
+ #define __USER_CS	(GDT_ENTRY_DEFAULT_USER_CS*8+3)
+ #ifndef CONFIG_PARAVIRT
+@@ -237,6 +244,17 @@ do {									\
+  * x86_32 user gs accessors.
+  */
+ #ifdef CONFIG_X86_32
++#ifdef CONFIG_KRX
++#define lazy_save_ds(v)		savesegment(ds, (v))
++#define lazy_save_es(v)		savesegment(es, (v))
++#define lazy_load_ds(v)		loadsegment(ds, (v))
++#define lazy_load_es(v)		loadsegment(es, (v))
++#else
++#define lazy_save_ds(v)		do { } while (0)	
++#define lazy_save_es(v)		do { } while (0)
++#define lazy_load_ds(v)		do { } while (0)
++#define lazy_load_es(v)		do { } while (0)
++#endif
+ #ifdef CONFIG_X86_32_LAZY_GS
+ #define get_user_gs(regs)	(u16)({unsigned long v; savesegment(gs, v); v;})
+ #define set_user_gs(regs, v)	loadsegment(gs, (unsigned long)(v))
+diff -uprN linux-3.19/arch/x86/Kconfig linux-3.19-krx/arch/x86/Kconfig
+--- linux-3.19/arch/x86/Kconfig	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/Kconfig	2017-07-23 16:03:46.336993405 -0400
+@@ -1811,6 +1811,7 @@ config RELOCATABLE
+ config RANDOMIZE_BASE
+ 	bool "Randomize the address of the kernel image"
+ 	depends on RELOCATABLE
++	depends on !KRX
+ 	default n
+ 	---help---
+ 	   Randomizes the physical and virtual address at which the
+@@ -1835,10 +1836,10 @@ config RANDOMIZE_BASE
+ config RANDOMIZE_BASE_MAX_OFFSET
+ 	hex "Maximum kASLR offset allowed" if EXPERT
+ 	depends on RANDOMIZE_BASE
+-	range 0x0 0x20000000 if X86_32
+-	default "0x20000000" if X86_32
+-	range 0x0 0x40000000 if X86_64
+-	default "0x40000000" if X86_64
++	range 0x0 0x8000000 if X86_32
++	default "0x8000000" if X86_32
++	range 0x0 0x20000000 if X86_64
++	default "0x20000000" if X86_64
+ 	---help---
+ 	  The lesser of RANDOMIZE_BASE_MAX_OFFSET and available physical
+ 	  memory is used to determine the maximal offset in bytes that will
+diff -uprN linux-3.19/arch/x86/Kconfig.debug linux-3.19-krx/arch/x86/Kconfig.debug
+--- linux-3.19/arch/x86/Kconfig.debug	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/Kconfig.debug	2017-07-23 16:03:47.764993459 -0400
+@@ -5,6 +5,39 @@ config TRACE_IRQFLAGS_SUPPORT
+ 
+ source "lib/Kconfig.debug"
+ 
++config KRX
++	bool "Enable exclusive R/X kernel memory protection (kR^X)"
++	depends on X86
++	depends on (DEBUG_RODATA && !MODULES) || (DEBUG_RODATA && MODULES && DEBUG_SET_MODULE_RONX)
++	default n
++	---help---
++	  This option offers protection against 'JIT-ROP' (kernel) attacks.*
++	  When enabled, executable kernel pages are no longer readable.
++
++	  *: "kR^X: Kernel Protection against Just-in-time Code Reuse."
++	     In Proc. of <TODO>.
++
++	  If in doubt, say "N".
++
++config KRX_VERBOSE
++	bool "Verbose kR^X reporting"
++	depends on KRX
++	default n
++	---help---
++	  Say Y to make kR^X output informational messages in kernel syslog.
++
++	  If in doubt, say "N". 
++
++config KRX_MPX
++	bool "Use Intel Memory Protection Extensions (MPX)"
++	depends on KRX && X86_64
++	default n
++	---help---
++	  Say Y to use MPX for enforcing kR^X. When enabled, KR^X checks
++	  are MPX-assisted.
++
++	  If in doubt, say "N". 
++
+ config STRICT_DEVMEM
+ 	bool "Filter access to /dev/mem"
+ 	---help---
+diff -uprN linux-3.19/arch/x86/kernel/alternative.c linux-3.19-krx/arch/x86/kernel/alternative.c
+--- linux-3.19/arch/x86/kernel/alternative.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/alternative.c	2017-07-23 16:18:16.357028411 -0400
+@@ -20,6 +20,7 @@
+ #include <asm/tlbflush.h>
+ #include <asm/io.h>
+ #include <asm/fixmap.h>
++#include <asm/desc.h>
+ 
+ #define MAX_PATCH_LEN (255-1)
+ 
+@@ -275,7 +276,7 @@ void __init_or_module apply_alternatives
+ 		if (!boot_cpu_has(a->cpuid))
+ 			continue;
+ 
+-		memcpy(insnbuf, replacement, a->replacementlen);
++		krx_memcpy(insnbuf, replacement, a->replacementlen);
+ 
+ 		/* 0xe8 is a relative jump; fix the offset. */
+ 		if (*insnbuf == 0xe8 && a->replacementlen == 5)
+@@ -314,6 +315,7 @@ static void alternatives_smp_unlock(cons
+ 	const s32 *poff;
+ 
+ 	mutex_lock(&text_mutex);
++	krx_disable();
+ 	for (poff = start; poff < end; poff++) {
+ 		u8 *ptr = (u8 *)poff + *poff;
+ 
+@@ -323,6 +325,7 @@ static void alternatives_smp_unlock(cons
+ 		if (*ptr == 0xf0)
+ 			text_poke(ptr, ((unsigned char []){0x3E}), 1);
+ 	}
++	krx_enable();
+ 	mutex_unlock(&text_mutex);
+ }
+ 
+@@ -457,7 +460,7 @@ void __init_or_module apply_paravirt(str
+ 
+ 		BUG_ON(p->len > MAX_PATCH_LEN);
+ 		/* prep the buffer with the original instructions */
+-		memcpy(insnbuf, p->instr, p->len);
++		krx_memcpy(insnbuf, p->instr, p->len);
+ 		used = pv_init_ops.patch(p->instrtype, p->clobbers, insnbuf,
+ 					 (unsigned long)p->instr, p->len);
+ 
+@@ -529,7 +532,7 @@ void *__init_or_module text_poke_early(v
+ {
+ 	unsigned long flags;
+ 	local_irq_save(flags);
+-	memcpy(addr, opcode, len);
++	krx_memcpy(addr, opcode, len);
+ 	sync_core();
+ 	local_irq_restore(flags);
+ 	/* Could also do a CLFLUSH here to speed up CPU recovery; but
+diff -uprN linux-3.19/arch/x86/kernel/cpu/common.c linux-3.19-krx/arch/x86/kernel/cpu/common.c
+--- linux-3.19/arch/x86/kernel/cpu/common.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/cpu/common.c	2017-07-23 16:03:46.776993421 -0400
+@@ -140,6 +140,9 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_p
+ 	[GDT_ENTRY_ESPFIX_SS]		= GDT_ENTRY_INIT(0xc092, 0, 0xfffff),
+ 	[GDT_ENTRY_PERCPU]		= GDT_ENTRY_INIT(0xc092, 0, 0xfffff),
+ 	GDT_STACK_CANARY_INIT
++#ifdef CONFIG_KRX
++	[GDT_ENTRY_USER_DS_ORIG]	= GDT_ENTRY_INIT(0xc0f2, 0, 0xfffff),
++#endif
+ #endif
+ } };
+ EXPORT_PER_CPU_SYMBOL_GPL(gdt_page);
+diff -uprN linux-3.19/arch/x86/kernel/doublefault.c linux-3.19-krx/arch/x86/kernel/doublefault.c
+--- linux-3.19/arch/x86/kernel/doublefault.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/doublefault.c	2017-07-23 16:03:46.964993428 -0400
+@@ -65,7 +65,12 @@ struct tss_struct doublefault_tss __cach
+ 		.ds		= __USER_DS,
+ 		.fs		= __KERNEL_PERCPU,
+ 
++#ifdef CONFIG_KRX
++		.__cr3		= (unsigned long)
++				__phys_addr_nodebug_reloc(swapper_pg_dir),
++#else
+ 		.__cr3		= __pa_nodebug(swapper_pg_dir),
++#endif
+ 	}
+ };
+ 
+diff -uprN linux-3.19/arch/x86/kernel/entry_64.S linux-3.19-krx/arch/x86/kernel/entry_64.S
+--- linux-3.19/arch/x86/kernel/entry_64.S	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/entry_64.S	2017-07-23 16:03:46.912993427 -0400
+@@ -307,6 +307,10 @@ ENTRY(save_paranoid)
+ 	testl %edx,%edx
+ 	js 1f	/* negative -> in kernel */
+ 	SWAPGS
++#ifdef	CONFIG_MPX
++	movq __krx_edata,%rcx
++	bndmk 0x0(,%rcx,1),%bnd0
++#endif
+ 	xorl %ebx,%ebx
+ 1:	ret
+ 	CFI_ENDPROC
+@@ -408,6 +412,10 @@ GLOBAL(system_call_after_swapgs)
+ 	movq_cfi rax,(ORIG_RAX-ARGOFFSET)
+ 	movq  %rcx,RIP-ARGOFFSET(%rsp)
+ 	CFI_REL_OFFSET rip,RIP-ARGOFFSET
++#ifdef	CONFIG_MPX
++	movq __krx_edata,%rcx
++	bndmk 0x0(,%rcx,1),%bnd0
++#endif
+ 	testl $_TIF_WORK_SYSCALL_ENTRY,TI_flags+THREAD_INFO(%rsp,RIP-ARGOFFSET)
+ 	jnz tracesys
+ system_call_fastpath:
+@@ -780,6 +788,10 @@ END(interrupt)
+ 	subq $ORIG_RAX-RBP, %rsp
+ 	CFI_ADJUST_CFA_OFFSET ORIG_RAX-RBP
+ 	SAVE_ARGS_IRQ
++#ifdef	CONFIG_MPX
++	movq __krx_edata,%rax
++	bndmk 0x0(,%rax,1),%bnd0
++#endif
+ 	call \func
+ 	.endm
+ 
+@@ -1379,6 +1391,10 @@ error_swapgs:
+ 	SWAPGS
+ error_sti:
+ 	TRACE_IRQS_OFF
++#ifdef	CONFIG_MPX
++	movq __krx_edata,%rcx
++	bndmk 0x0(,%rcx,1),%bnd0
++#endif
+ 	ret
+ 
+ /*
+diff -uprN linux-3.19/arch/x86/kernel/ftrace.c linux-3.19-krx/arch/x86/kernel/ftrace.c
+--- linux-3.19/arch/x86/kernel/ftrace.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/ftrace.c	2017-07-23 16:21:20.625032841 -0400
+@@ -29,6 +29,13 @@
+ #include <asm/ftrace.h>
+ #include <asm/nops.h>
+ 
++#ifdef	CONFIG_KRX
++noinline const char*krx_get_tp_name(struct tracepoint *tp)
++{
++	return tp->name;
++}
++#endif
++
+ #ifdef CONFIG_DYNAMIC_FTRACE
+ 
+ int ftrace_arch_code_modify_prepare(void)
+@@ -230,7 +237,7 @@ static int update_ftrace_func(unsigned l
+ 	unsigned char old[MCOUNT_INSN_SIZE];
+ 	int ret;
+ 
+-	memcpy(old, (void *)ip, MCOUNT_INSN_SIZE);
++	krx_memcpy(old, (void *)ip, MCOUNT_INSN_SIZE);
+ 
+ 	ftrace_update_func = ip;
+ 	/* Make sure the breakpoints see the ftrace_update_func update */
+@@ -763,7 +770,7 @@ create_trampoline(struct ftrace_ops *ops
+ 
+ 	/* The trampoline ends with a jmp to ftrace_return */
+ 	jmp = ftrace_jmp_replace(ip, (unsigned long)ftrace_return);
+-	memcpy(trampoline + size, jmp, MCOUNT_INSN_SIZE);
++	krx_memcpy(trampoline + size, jmp, MCOUNT_INSN_SIZE);
+ 
+ 	/*
+ 	 * The address of the ftrace_ops that is used for this trampoline
+@@ -777,7 +784,7 @@ create_trampoline(struct ftrace_ops *ops
+ 	*ptr = (unsigned long)ops;
+ 
+ 	op_offset -= start_offset;
+-	memcpy(&op_ptr, trampoline + op_offset, OP_REF_SIZE);
++	krx_memcpy(&op_ptr, trampoline + op_offset, OP_REF_SIZE);
+ 
+ 	/* Are we pointing to the reference? */
+ 	if (WARN_ON(memcmp(op_ptr.op, op_ref, 3) != 0)) {
+@@ -792,7 +799,7 @@ create_trampoline(struct ftrace_ops *ops
+ 	op_ptr.offset = offset;
+ 
+ 	/* put in the new offset to the ftrace_ops */
+-	memcpy(trampoline + op_offset, &op_ptr, OP_REF_SIZE);
++	krx_memcpy(trampoline + op_offset, &op_ptr, OP_REF_SIZE);
+ 
+ 	/* ALLOC_TRAMP flags lets us know we created it */
+ 	ops->flags |= FTRACE_OPS_FL_ALLOC_TRAMP;
+diff -uprN linux-3.19/arch/x86/kernel/head32.c linux-3.19-krx/arch/x86/kernel/head32.c
+--- linux-3.19/arch/x86/kernel/head32.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/head32.c	2017-07-23 16:03:46.984993428 -0400
+@@ -29,10 +29,25 @@ static void __init i386_default_early_se
+ 	reserve_ebda_region();
+ }
+ 
++#ifdef CONFIG_KRX
++#include <asm/desc.h>
++static inline void __init update_user_ds(void)
++{
++	struct desc_struct user_ds = GDT_ENTRY_INIT(0xc0f2, 0,
++				(unsigned long)__krx_edata >> PAGE_SHIFT);
++	gdt_page.gdt[GDT_ENTRY_DEFAULT_USER_DS] = user_ds;
++}
++#else
++static inline void update_user_ds(void) { }
++#endif
++
+ asmlinkage __visible void __init i386_start_kernel(void)
+ {
+ 	sanitize_boot_params(&boot_params);
+ 
++	/* update the USER_DS entry */
++	update_user_ds();
++
+ 	/* Call the subarch specific early setup function */
+ 	switch (boot_params.hdr.hardware_subarch) {
+ 	case X86_SUBARCH_INTEL_MID:
+diff -uprN linux-3.19/arch/x86/kernel/head_32.S linux-3.19-krx/arch/x86/kernel/head_32.S
+--- linux-3.19/arch/x86/kernel/head_32.S	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/head_32.S	2017-07-23 16:03:47.044993432 -0400
+@@ -24,7 +24,11 @@
+ #include <asm/nops.h>
+ 
+ /* Physical address */
++#ifdef CONFIG_KRX
++#define pa(X) ((X) - __START_KERNEL_map)
++#else
+ #define pa(X) ((X) - __PAGE_OFFSET)
++#endif
+ 
+ /*
+  * References to members of the new_cpu_data structure.
+@@ -104,7 +108,11 @@ ENTRY(startup_32)
+ 	movl %eax,%gs
+ 	movl %eax,%ss
+ 2:
++#ifdef CONFIG_KRX
++	leal -__START_KERNEL_map(%ecx),%esp
++#else
+ 	leal -__PAGE_OFFSET(%ecx),%esp
++#endif
+ 
+ /*
+  * Clear BSS first so that there are no surprises...
+@@ -169,6 +177,22 @@ ENTRY(startup_32)
+ 
+ #define KPMDS (((-__PAGE_OFFSET) >> 30) & 3) /* Number of kernel PMDs */
+ 
++#ifdef	CONFIG_KRX
++#define	ENTRY_SIZE	8
++/*
++ * Offset of upper PMD that will also hold the mapped PTE entries.
++ * Necessary to ensure that when paging is enabled `.text' will be
++ * available in the `__START_KERNEL_map' region.
++ */
++krx_pmd_offset =	\
++	(((__START_KERNEL_map - __PAGE_OFFSET) >> PMD_SHIFT) * ENTRY_SIZE)
++/*
++ * The (physical) address of the first PMD above the first 16MB of RAM.
++ * Indicates when to start creating upper PMD entries.
++ */
++krx_kernel_start =	\
++	(pa(initial_pg_pmd) + (CONFIG_PHYSICAL_START >> PMD_SHIFT) * ENTRY_SIZE)
++#endif
+ 	xorl %ebx,%ebx				/* %ebx is kept at zero */
+ 
+ 	movl $pa(__brk_base), %edi
+@@ -178,6 +202,13 @@ ENTRY(startup_32)
+ 	leal PDE_IDENT_ATTR(%edi),%ecx		/* Create PMD entry */
+ 	movl %ecx,(%edx)			/* Store PMD entry */
+ 						/* Upper half already zero */
++#ifdef CONFIG_KRX
++	movl $krx_kernel_start, %ebp
++	cmpl %ebp,%edx
++	jl 12f
++	movl %ecx,krx_pmd_offset(%edx)		/* Store upper PMD entry */
++12:
++#endif
+ 	addl $8,%edx
+ 	movl $512,%ecx
+ 11:
+@@ -195,10 +226,19 @@ ENTRY(startup_32)
+ 	cmpl %ebp,%eax
+ 	jb 10b
+ 1:
++#ifdef CONFIG_KRX
++	addl $__START_KERNEL_map, %edi
++#else
+ 	addl $__PAGE_OFFSET, %edi
++#endif
+ 	movl %edi, pa(_brk_end)
+ 	shrl $12, %eax
+ 	movl %eax, pa(max_pfn_mapped)
++#ifdef CONFIG_KRX
++	shll $12, %eax
++	addl $__START_KERNEL_map, %eax
++	movl %eax, pa(max_init_mapped)
++#endif
+ 
+ 	/* Do early initialization of the fixmap area */
+ 	movl $pa(initial_pg_fixmap)+PDE_IDENT_ATTR,%eax
+@@ -206,6 +246,12 @@ ENTRY(startup_32)
+ #else	/* Not PAE */
+ 
+ page_pde_offset = (__PAGE_OFFSET >> 20);
++#ifdef	CONFIG_KRX
++#define	ENTRY_SIZE	4
++krx_pde_offset		= (__START_KERNEL_map >> 20);
++krx_kernel_start	=	\
++(pa(initial_page_table) + (CONFIG_PHYSICAL_START >> PGDIR_SHIFT) * ENTRY_SIZE);
++#endif
+ 
+ 	movl $pa(__brk_base), %edi
+ 	movl $pa(initial_page_table), %edx
+@@ -214,6 +260,13 @@ page_pde_offset = (__PAGE_OFFSET >> 20);
+ 	leal PDE_IDENT_ATTR(%edi),%ecx		/* Create PDE entry */
+ 	movl %ecx,(%edx)			/* Store identity PDE entry */
+ 	movl %ecx,page_pde_offset(%edx)		/* Store kernel PDE entry */
++#ifdef CONFIG_KRX
++	movl $krx_kernel_start, %ebp
++	cmpl %ebp,%edx
++	jl 12f
++	movl %ecx,krx_pde_offset(%edx)		/* Store KRX PDE entry */
++12:
++#endif
+ 	addl $4,%edx
+ 	movl $1024, %ecx
+ 11:
+@@ -226,10 +279,19 @@ page_pde_offset = (__PAGE_OFFSET >> 20);
+ 	movl $pa(_end) + MAPPING_BEYOND_END + PTE_IDENT_ATTR, %ebp
+ 	cmpl %ebp,%eax
+ 	jb 10b
++#ifdef CONFIG_KRX
++	addl $__START_KERNEL_map, %edi
++#else
+ 	addl $__PAGE_OFFSET, %edi
++#endif
+ 	movl %edi, pa(_brk_end)
+ 	shrl $12, %eax
+ 	movl %eax, pa(max_pfn_mapped)
++#ifdef CONFIG_KRX
++	shll $12, %eax
++	addl $__START_KERNEL_map, %eax
++	movl %eax, pa(max_init_mapped)
++#endif
+ 
+ 	/* Do early initialization of the fixmap area */
+ 	movl $pa(initial_pg_fixmap)+PDE_IDENT_ATTR,%eax
+@@ -248,7 +310,11 @@ page_pde_offset = (__PAGE_OFFSET >> 20);
+ 	jae bad_subarch
+ 
+ 	movl pa(subarch_entries)(,%eax,4), %eax
++#ifdef CONFIG_KRX
++	subl $__START_KERNEL_map,%eax
++#else
+ 	subl $__PAGE_OFFSET, %eax
++#endif
+ 	jmp *%eax
+ 
+ bad_subarch:
+@@ -449,7 +515,11 @@ is486:
+ 1:	movl $(__KERNEL_DS),%eax	# reload all the segment registers
+ 	movl %eax,%ss			# after changing gdt.
+ 
++#ifdef CONFIG_KRX
++	movl $(__USER_DS_ORIG),%eax	# DS/ES contains default USER segment
++#else
+ 	movl $(__USER_DS),%eax		# DS/ES contains default USER segment
++#endif
+ 	movl %eax,%ds
+ 	movl %eax,%es
+ 
+@@ -736,7 +806,11 @@ fault_msg:
+ 	.word 0				# 32 bit align gdt_desc.address
+ boot_gdt_descr:
+ 	.word __BOOT_DS+7
++#ifdef CONFIG_KRX
++	.long boot_gdt - __START_KERNEL_map
++#else
+ 	.long boot_gdt - __PAGE_OFFSET
++#endif
+ 
+ 	.word 0				# 32-bit align idt_desc.address
+ idt_descr:
+diff -uprN linux-3.19/arch/x86/kernel/head64.c linux-3.19-krx/arch/x86/kernel/head64.c
+--- linux-3.19/arch/x86/kernel/head64.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/head64.c	2017-07-23 16:03:46.984993428 -0400
+@@ -153,7 +153,9 @@ asmlinkage __visible void __init x86_64_
+ 	BUILD_BUG_ON(!(MODULES_VADDR > __START_KERNEL));
+ 	BUILD_BUG_ON(!(((MODULES_END - 1) & PGDIR_MASK) ==
+ 				(__START_KERNEL & PGDIR_MASK)));
++#ifndef CONFIG_KRX
+ 	BUILD_BUG_ON(__fix_to_virt(__end_of_fixed_addresses) <= MODULES_END);
++#endif
+ 
+ 	/* Kill off the identity-map trampoline */
+ 	reset_early_page_tables();
+diff -uprN linux-3.19/arch/x86/kernel/head_64.S linux-3.19-krx/arch/x86/kernel/head_64.S
+--- linux-3.19/arch/x86/kernel/head_64.S	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/head_64.S	2017-07-23 16:03:47.040993431 -0400
+@@ -101,7 +101,11 @@ startup_64:
+ 	 * creates a bunch of nonsense entries but that is fine --
+ 	 * it avoids problems around wraparound.
+ 	 */
++#ifdef	CONFIG_KRX
++	leaq	__krx_sdata(%rip), %rdi
++#else
+ 	leaq	_text(%rip), %rdi
++#endif
+ 	leaq	early_level4_pgt(%rip), %rbx
+ 
+ 	movq	%rdi, %rax
+@@ -254,6 +258,22 @@ ENTRY(secondary_startup_64)
+ 	movl	initial_gs+4(%rip),%edx
+ 	wrmsr	
+ 
++#ifdef	CONFIG_MPX
++	/* Verify that the CPU supports MPX. */
++	movl	$0x7,%eax
++	xor	%ecx,%ecx
++	cpuid
++	and	$0x4000,%ebx
++	jz	2f
++	/* Enable MPX. */
++	movl	$0x1,cpu_has_mpx
++	movl	$MSR_IA32_BNDCFGS,%ecx
++	xor	%edx,%edx
++	movl	$0x3,%eax
++	wrmsr
++2:	
++#endif
++
+ 	/* rsi is pointer to real mode structure with interesting info.
+ 	   pass it to C */
+ 	movq	%rsi, %rdi
+@@ -472,10 +492,17 @@ NEXT_PAGE(level2_ident_pgt)
+ #endif
+ 
+ NEXT_PAGE(level3_kernel_pgt)
++#ifdef	CONFIG_KRX
++	.fill	L3_START_KERNEL-1,8,0
++	/* (2^48-(2*1024*1024*1024)-((2^39)*511))/(2^30) = 510 */
++	.quad	level2_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
++	.quad	level2_kernel_pgt - __START_KERNEL_map + _KERNPG_TABLE
++#else
+ 	.fill	L3_START_KERNEL,8,0
+ 	/* (2^48-(2*1024*1024*1024)-((2^39)*511))/(2^30) = 510 */
+ 	.quad	level2_kernel_pgt - __START_KERNEL_map + _KERNPG_TABLE
+ 	.quad	level2_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
++#endif
+ 
+ NEXT_PAGE(level2_kernel_pgt)
+ 	/*
+diff -uprN linux-3.19/arch/x86/kernel/jump_label.c linux-3.19-krx/arch/x86/kernel/jump_label.c
+--- linux-3.19/arch/x86/kernel/jump_label.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/jump_label.c	2017-07-23 16:03:46.996993431 -0400
+@@ -13,6 +13,7 @@
+ #include <linux/cpu.h>
+ #include <asm/kprobes.h>
+ #include <asm/alternative.h>
++#include <asm/desc.h>
+ 
+ #ifdef HAVE_JUMP_LABEL
+ 
+@@ -36,6 +37,16 @@ static void bug_at(unsigned char *ip, in
+ 	BUG();
+ }
+ 
++noinline jump_label_t krx_get_entry_code(struct jump_entry *entry)
++{
++	return entry->code;
++}
++
++noinline jump_label_t krx_get_entry_target(struct jump_entry *entry)
++{
++	return entry->target;
++}
++
+ static void __jump_label_transform(struct jump_entry *entry,
+ 				   enum jump_label_type type,
+ 				   void *(*poker)(void *, const void *, size_t),
+@@ -44,6 +55,8 @@ static void __jump_label_transform(struc
+ 	union jump_code_union code;
+ 	const unsigned char default_nop[] = { STATIC_KEY_INIT_NOP };
+ 	const unsigned char *ideal_nop = ideal_nops[NOP_ATOMIC5];
++	jump_label_t entry_code = krx_get_entry_code(entry);
++	jump_label_t entry_target;
+ 
+ 	if (type == JUMP_LABEL_ENABLE) {
+ 		if (init) {
+@@ -51,22 +64,23 @@ static void __jump_label_transform(struc
+ 			 * Jump label is enabled for the first time.
+ 			 * So we expect a default_nop...
+ 			 */
+-			if (unlikely(memcmp((void *)entry->code, default_nop, 5)
++			if (unlikely(krx_memcmp((void *)entry_code, default_nop, 5)
+ 				     != 0))
+-				bug_at((void *)entry->code, __LINE__);
++				bug_at((void *)entry_code, __LINE__);
+ 		} else {
+ 			/*
+ 			 * ...otherwise expect an ideal_nop. Otherwise
+ 			 * something went horribly wrong.
+ 			 */
+-			if (unlikely(memcmp((void *)entry->code, ideal_nop, 5)
++			if (unlikely(krx_memcmp((void *)entry_code, ideal_nop, 5)
+ 				     != 0))
+-				bug_at((void *)entry->code, __LINE__);
++				bug_at((void *)entry_code, __LINE__);
+ 		}
+ 
+ 		code.jump = 0xe9;
+-		code.offset = entry->target -
+-				(entry->code + JUMP_LABEL_NOP_SIZE);
++		entry_target = krx_get_entry_target(entry);
++		code.offset = entry_target -
++				(entry_code + JUMP_LABEL_NOP_SIZE);
+ 	} else {
+ 		/*
+ 		 * We are disabling this jump label. If it is not what
+@@ -75,14 +89,15 @@ static void __jump_label_transform(struc
+ 		 * are converting the default nop to the ideal nop.
+ 		 */
+ 		if (init) {
+-			if (unlikely(memcmp((void *)entry->code, default_nop, 5) != 0))
+-				bug_at((void *)entry->code, __LINE__);
++			if (unlikely(krx_memcmp((void *)entry_code, default_nop, 5) != 0))
++				bug_at((void *)entry_code, __LINE__);
+ 		} else {
+ 			code.jump = 0xe9;
+-			code.offset = entry->target -
+-				(entry->code + JUMP_LABEL_NOP_SIZE);
+-			if (unlikely(memcmp((void *)entry->code, &code, 5) != 0))
+-				bug_at((void *)entry->code, __LINE__);
++			entry_target = krx_get_entry_target(entry);
++			code.offset = entry_target -
++				(entry_code + JUMP_LABEL_NOP_SIZE);
++			if (unlikely(krx_memcmp((void *)entry_code, &code, 5) != 0))
++				bug_at((void *)entry_code, __LINE__);
+ 		}
+ 		memcpy(&code, ideal_nops[NOP_ATOMIC5], JUMP_LABEL_NOP_SIZE);
+ 	}
+@@ -95,11 +110,13 @@ static void __jump_label_transform(struc
+ 	 * always nop being the 'currently valid' instruction
+ 	 *
+ 	 */
++	krx_disable();
+ 	if (poker)
+-		(*poker)((void *)entry->code, &code, JUMP_LABEL_NOP_SIZE);
++		(*poker)((void *)entry_code, &code, JUMP_LABEL_NOP_SIZE);
+ 	else
+-		text_poke_bp((void *)entry->code, &code, JUMP_LABEL_NOP_SIZE,
+-			     (void *)entry->code + JUMP_LABEL_NOP_SIZE);
++		text_poke_bp((void *)entry_code, &code, JUMP_LABEL_NOP_SIZE,
++			     (void *)entry_code + JUMP_LABEL_NOP_SIZE);
++	krx_enable();
+ }
+ 
+ void arch_jump_label_transform(struct jump_entry *entry,
+@@ -132,7 +149,7 @@ __init_or_module void arch_jump_label_tr
+ 		const unsigned char default_nop[] = { STATIC_KEY_INIT_NOP };
+ 		const unsigned char *ideal_nop = ideal_nops[NOP_ATOMIC5];
+ 
+-		if (memcmp(ideal_nop, default_nop, 5) != 0)
++		if (krx_memcmp(ideal_nop, default_nop, 5) != 0)
+ 			jlstate = JL_STATE_UPDATE;
+ 		else
+ 			jlstate = JL_STATE_NO_UPDATE;
+diff -uprN linux-3.19/arch/x86/kernel/kgdb.c linux-3.19-krx/arch/x86/kernel/kgdb.c
+--- linux-3.19/arch/x86/kernel/kgdb.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/kgdb.c	2017-07-23 16:03:46.912993427 -0400
+@@ -49,6 +49,7 @@
+ #include <asm/apicdef.h>
+ #include <asm/apic.h>
+ #include <asm/nmi.h>
++#include <asm/desc.h>
+ 
+ struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
+ {
+@@ -765,8 +766,12 @@ int kgdb_arch_set_breakpoint(struct kgdb
+ 	 */
+ 	if (mutex_is_locked(&text_mutex))
+ 		return -EBUSY;
++	
++	krx_disable();
+ 	text_poke((void *)bpt->bpt_addr, arch_kgdb_ops.gdb_bpt_instr,
+ 		  BREAK_INSTR_SIZE);
++	krx_enable();
++
+ 	err = probe_kernel_read(opc, (char *)bpt->bpt_addr, BREAK_INSTR_SIZE);
+ 	if (err)
+ 		return err;
+diff -uprN linux-3.19/arch/x86/kernel/kprobes/core.c linux-3.19-krx/arch/x86/kernel/kprobes/core.c
+--- linux-3.19/arch/x86/kernel/kprobes/core.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/kprobes/core.c	2017-07-23 17:30:45.473184984 -0400
+@@ -145,11 +145,21 @@ NOKPROBE_SYMBOL(synthesize_relcall);
+ static kprobe_opcode_t *skip_prefixes(kprobe_opcode_t *insn)
+ {
+ 	insn_attr_t attr;
+-
+-	attr = inat_get_opcode_attribute((insn_byte_t)*insn);
++	insn_byte_t insn_byte;
++	
++	krx_disable();
++	insn_byte = (insn_byte_t)*insn;
++	krx_enable();
++	attr = inat_get_opcode_attribute(insn_byte);
++	
+ 	while (inat_is_legacy_prefix(attr)) {
+ 		insn++;
+-		attr = inat_get_opcode_attribute((insn_byte_t)*insn);
++		
++		krx_disable();
++		insn_byte = (insn_byte_t)*insn;
++		krx_enable();
++
++		attr = inat_get_opcode_attribute(insn_byte);
+ 	}
+ #ifdef CONFIG_X86_64
+ 	if (inat_is_rex_prefix(attr))
+@@ -220,7 +230,10 @@ retry:
+ }
+ 
+ static unsigned long
+-__recover_probed_insn(kprobe_opcode_t *buf, unsigned long addr)
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_64)
++noinline
++#endif
++krx_recover_probed_insn(kprobe_opcode_t *buf, unsigned long addr)
+ {
+ 	struct kprobe *kp;
+ 
+@@ -260,7 +273,7 @@ unsigned long recover_probed_instruction
+ 	if (__addr != addr)
+ 		return __addr;
+ 
+-	return __recover_probed_insn(buf, addr);
++	return krx_recover_probed_insn(buf, addr);
+ }
+ 
+ /* Check if paddr is at an instruction boundary */
+@@ -338,7 +351,7 @@ int __copy_instruction(u8 *dest, u8 *src
+ 	/* Another subsystem puts a breakpoint, failed to recover */
+ 	if (insn.opcode.bytes[0] == BREAKPOINT_INSTRUCTION)
+ 		return 0;
+-	memcpy(dest, insn.kaddr, insn.length);
++	krx_memcpy(dest, insn.kaddr, insn.length);
+ 
+ #ifdef CONFIG_X86_64
+ 	if (insn_rip_relative(&insn)) {
+@@ -371,6 +384,17 @@ int __copy_instruction(u8 *dest, u8 *src
+ 	return insn.length;
+ }
+ 
++static kprobe_opcode_t
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_64)
++noinline
++#else
++inline
++#endif
++krx_get_opcode(struct kprobe *p)
++{
++	return p->ainsn.insn[0];
++}
++
+ static int arch_copy_kprobe(struct kprobe *p)
+ {
+ 	int ret;
+@@ -393,7 +417,7 @@ static int arch_copy_kprobe(struct kprob
+ 	p->ainsn.if_modifier = is_IF_modifier(p->ainsn.insn);
+ 
+ 	/* Also, displacement change doesn't affect the first byte */
+-	p->opcode = p->ainsn.insn[0];
++	p->opcode = krx_get_opcode(p);
+ 
+ 	return 0;
+ }
+@@ -575,6 +599,7 @@ int kprobe_int3_handler(struct pt_regs *
+ 	kprobe_opcode_t *addr;
+ 	struct kprobe *p;
+ 	struct kprobe_ctlblk *kcb;
++	kprobe_opcode_t opcode;
+ 
+ 	if (user_mode_vm(regs))
+ 		return 0;
+@@ -591,6 +616,10 @@ int kprobe_int3_handler(struct pt_regs *
+ 	kcb = get_kprobe_ctlblk();
+ 	p = get_kprobe(addr);
+ 
++	krx_disable();
++	opcode = *addr;
++	krx_enable();
++	
+ 	if (p) {
+ 		if (kprobe_running()) {
+ 			if (reenter_kprobe(p, regs, kcb))
+@@ -611,7 +640,7 @@ int kprobe_int3_handler(struct pt_regs *
+ 				setup_singlestep(p, regs, kcb, 0);
+ 			return 1;
+ 		}
+-	} else if (*addr != BREAKPOINT_INSTRUCTION) {
++	} else if (opcode != BREAKPOINT_INSTRUCTION) {
+ 		/*
+ 		 * The breakpoint instruction was removed right
+ 		 * after we hit it.  Another cpu has removed
+@@ -801,15 +830,24 @@ static void resume_execution(struct kpro
+ 	unsigned long copy_ip = (unsigned long)p->ainsn.insn;
+ 	unsigned long orig_ip = (unsigned long)p->addr;
+ 	kprobe_opcode_t *insn = p->ainsn.insn;
++	kprobe_opcode_t opcode;
+ 
+ 	/* Skip prefixes */
+ 	insn = skip_prefixes(insn);
+ 
+ 	regs->flags &= ~X86_EFLAGS_TF;
+-	switch (*insn) {
++	
++	krx_disable();
++	opcode = *insn;
++	krx_enable();
++
++	switch (opcode) {
+ 	case 0x9c:	/* pushfl */
++		krx_disable();
+ 		*tos &= ~(X86_EFLAGS_TF | X86_EFLAGS_IF);
+ 		*tos |= kcb->kprobe_old_flags;
++		krx_enable();
++		
+ 		break;
+ 	case 0xc2:	/* iret/ret/lret */
+ 	case 0xc3:
+@@ -821,11 +859,17 @@ static void resume_execution(struct kpro
+ 		p->ainsn.boostable = 1;
+ 		goto no_change;
+ 	case 0xe8:	/* call relative - Fix return addr */
++		krx_disable();
+ 		*tos = orig_ip + (*tos - copy_ip);
++		krx_enable();
++
+ 		break;
+ #ifdef CONFIG_X86_32
+ 	case 0x9a:	/* call absolute -- same as call absolute, indirect */
++		krx_disable();
+ 		*tos = orig_ip + (*tos - copy_ip);
++		krx_enable();
++
+ 		goto no_change;
+ #endif
+ 	case 0xff:
+@@ -835,7 +879,10 @@ static void resume_execution(struct kpro
+ 			 * Fix return addr; ip is correct.
+ 			 * But this is not boostable
+ 			 */
++			krx_disable();
+ 			*tos = orig_ip + (*tos - copy_ip);
++			krx_enable();
++			
+ 			goto no_change;
+ 		} else if (((insn[1] & 0x31) == 0x20) ||
+ 			   ((insn[1] & 0x31) == 0x21)) {
+@@ -857,8 +904,10 @@ static void resume_execution(struct kpro
+ 			 * These instructions can be executed directly if it
+ 			 * jumps back to correct address.
+ 			 */
++			krx_disable();
+ 			synthesize_reljump((void *)regs->ip,
+ 				(void *)orig_ip + (regs->ip - copy_ip));
++			krx_enable();
+ 			p->ainsn.boostable = 1;
+ 		} else {
+ 			p->ainsn.boostable = -1;
+diff -uprN linux-3.19/arch/x86/kernel/kprobes/opt.c linux-3.19-krx/arch/x86/kernel/kprobes/opt.c
+--- linux-3.19/arch/x86/kernel/kprobes/opt.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/kprobes/opt.c	2017-07-23 16:30:48.393056623 -0400
+@@ -356,7 +356,7 @@ int arch_prepare_optimized_kprobe(struct
+ 	op->optinsn.size = ret;
+ 
+ 	/* Copy arch-dep-instance from template */
+-	memcpy(buf, &optprobe_template_entry, TMPL_END_IDX);
++	krx_memcpy(buf, &optprobe_template_entry, TMPL_END_IDX);
+ 
+ 	/* Set probe information */
+ 	synthesize_set_arg1(buf + TMPL_MOVE_IDX, (unsigned long)op);
+@@ -390,7 +390,7 @@ void arch_optimize_kprobes(struct list_h
+ 		WARN_ON(kprobe_disabled(&op->kp));
+ 
+ 		/* Backup instructions which will be replaced by jump address */
+-		memcpy(op->optinsn.copied_insn, op->kp.addr + INT3_SIZE,
++		krx_memcpy(op->optinsn.copied_insn, op->kp.addr + INT3_SIZE,
+ 		       RELATIVE_ADDR_SIZE);
+ 
+ 		insn_buf[0] = RELATIVEJUMP_OPCODE;
+diff -uprN linux-3.19/arch/x86/kernel/module.c linux-3.19-krx/arch/x86/kernel/module.c
+--- linux-3.19/arch/x86/kernel/module.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/module.c	2017-07-23 16:03:46.516993411 -0400
+@@ -81,6 +81,31 @@ static unsigned long int get_module_load
+ }
+ #endif
+ 
++#ifdef CONFIG_KRX
++void *module_data_alloc(unsigned long size)
++{
++	if (PAGE_ALIGN(size) > MODULES_DATA_LEN)
++		return NULL;
++	return __vmalloc_node_range(size, 1,
++				MODULES_DATA_VADDR + get_module_load_offset(),
++				MODULES_DATA_END, GFP_KERNEL | __GFP_HIGHMEM,
++				PAGE_KERNEL, NUMA_NO_NODE,
++				__builtin_return_address(0));
++}
++
++void *module_alloc_nx(unsigned long size)
++{
++	if (PAGE_ALIGN(size) > MODULES_DATA_LEN)
++		return NULL;
++	return __vmalloc_node_range(size, 1,
++				MODULES_VADDR + get_module_load_offset(),
++				MODULES_END, GFP_KERNEL | __GFP_HIGHMEM,
++				PAGE_KERNEL, NUMA_NO_NODE,
++				__builtin_return_address(0));
++}
++
++#endif
++
+ void *module_alloc(unsigned long size)
+ {
+ 	if (PAGE_ALIGN(size) > MODULES_LEN)
+@@ -118,11 +143,15 @@ int apply_relocate(Elf32_Shdr *sechdrs,
+ 		switch (ELF32_R_TYPE(rel[i].r_info)) {
+ 		case R_386_32:
+ 			/* We add the value into the location given */
++			krx_disable();
+ 			*location += sym->st_value;
++			krx_enable();
+ 			break;
+ 		case R_386_PC32:
+ 			/* Add the value, subtract its position */
++			krx_disable();
+ 			*location += sym->st_value - (uint32_t)location;
++			krx_enable();
+ 			break;
+ 		default:
+ 			pr_err("%s: Unknown relocation: %u\n",
+diff -uprN linux-3.19/arch/x86/kernel/paravirt.c linux-3.19-krx/arch/x86/kernel/paravirt.c
+--- linux-3.19/arch/x86/kernel/paravirt.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/paravirt.c	2017-07-23 16:03:47.020993431 -0400
+@@ -176,7 +176,7 @@ unsigned paravirt_patch_insns(void *insn
+ 	if (insn_len > len || start == NULL)
+ 		insn_len = len;
+ 	else
+-		memcpy(insnbuf, start, insn_len);
++		krx_memcpy(insnbuf, start, insn_len);
+ 
+ 	return insn_len;
+ }
+diff -uprN linux-3.19/arch/x86/kernel/process_32.c linux-3.19-krx/arch/x86/kernel/process_32.c
+--- linux-3.19/arch/x86/kernel/process_32.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/process_32.c	2017-07-23 16:03:46.988993428 -0400
+@@ -271,6 +271,9 @@ __switch_to(struct task_struct *prev_p,
+ 	 * running inside of a hypervisor layer.
+ 	 */
+ 	lazy_save_gs(prev->gs);
++	
++	lazy_save_ds(prev->ds);
++	lazy_save_es(prev->es);
+ 
+ 	/*
+ 	 * Load the per-thread Thread-Local Storage descriptor.
+@@ -319,6 +322,11 @@ __switch_to(struct task_struct *prev_p,
+ 	 */
+ 	if (prev->gs | next->gs)
+ 		lazy_load_gs(next->gs);
++	
++	if (likely(next->ds))
++		lazy_load_ds(next->ds);
++	if (likely(next->es))
++		lazy_load_es(next->es);
+ 
+ 	switch_fpu_finish(next_p, fpu);
+ 
+diff -uprN linux-3.19/arch/x86/kernel/setup.c linux-3.19-krx/arch/x86/kernel/setup.c
+--- linux-3.19/arch/x86/kernel/setup.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/setup.c	2017-07-23 16:35:15.105064604 -0400
+@@ -120,6 +120,9 @@
+  */
+ unsigned long max_low_pfn_mapped;
+ unsigned long max_pfn_mapped;
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_32)
++unsigned long max_init_mapped;
++#endif
+ 
+ #ifdef CONFIG_DMI
+ RESERVE_BRK(dmi_alloc, 65536);
+@@ -856,8 +859,18 @@ dump_kernel_offset(struct notifier_block
+ 
+ void __init setup_arch(char **cmdline_p)
+ {
++#ifdef CONFIG_KRX
++#ifdef CONFIG_X86_32
++	reserve_top_address(KERNEL_END - KERNEL_START);
++#endif
++	memblock_reserve(__pa_symbol(_text),
++			(unsigned long)_end - (unsigned long)_text);
++	memblock_reserve(__pa_symbol(__krx_sdata),
++			(unsigned long)__bss_stop - (unsigned long)__krx_sdata);
++#else
+ 	memblock_reserve(__pa_symbol(_text),
+ 			 (unsigned long)__bss_stop - (unsigned long)_text);
++#endif
+ 
+ 	early_reserve_initrd();
+ 
+@@ -964,7 +977,11 @@ void __init setup_arch(char **cmdline_p)
+ 
+ 	code_resource.start = __pa_symbol(_text);
+ 	code_resource.end = __pa_symbol(_etext)-1;
++#ifdef CONFIG_KRX
++	data_resource.start = __pa_symbol(__krx_edata);
++#else
+ 	data_resource.start = __pa_symbol(_etext);
++#endif
+ 	data_resource.end = __pa_symbol(_edata)-1;
+ 	bss_resource.start = __pa_symbol(__bss_start);
+ 	bss_resource.end = __pa_symbol(__bss_stop)-1;
+diff -uprN linux-3.19/arch/x86/kernel/vmlinux.lds.S linux-3.19-krx/arch/x86/kernel/vmlinux.lds.S
+--- linux-3.19/arch/x86/kernel/vmlinux.lds.S	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/kernel/vmlinux.lds.S	2017-07-23 16:36:25.149064642 -0400
+@@ -14,10 +14,10 @@
+  * put it inside the section definition.
+  */
+ 
+-#ifdef CONFIG_X86_32
+-#define LOAD_OFFSET __PAGE_OFFSET
++#if defined(CONFIG_KRX) || defined(CONFIG_X86_64)
++#define	LOAD_OFFSET __START_KERNEL_map
+ #else
+-#define LOAD_OFFSET __START_KERNEL_map
++#define	LOAD_OFFSET __PAGE_OFFSET
+ #endif
+ 
+ #include <asm-generic/vmlinux.lds.h>
+@@ -26,6 +26,7 @@
+ #include <asm/page_types.h>
+ #include <asm/cache.h>
+ #include <asm/boot.h>
++#include <linux/threads.h>
+ 
+ #undef i386     /* in case the preprocessor is a 32bit one */
+ 
+@@ -68,14 +69,24 @@ jiffies_64 = jiffies;
+ #endif
+ 
+ PHDRS {
++#ifdef CONFIG_KRX
++	rodata PT_LOAD FLAGS(4);	/* R__ */
++	data PT_LOAD FLAGS(6);		/* RW_ */
++#else
+ 	text PT_LOAD FLAGS(5);          /* R_E */
++	rodata PT_LOAD FLAGS(4);	/* R__ */
+ 	data PT_LOAD FLAGS(6);          /* RW_ */
++#endif
+ #ifdef CONFIG_X86_64
+ #ifdef CONFIG_SMP
+ 	percpu PT_LOAD FLAGS(6);        /* RW_ */
+ #endif
+ 	init PT_LOAD FLAGS(7);          /* RWE */
+ #endif
++#ifdef CONFIG_KRX
++	text PT_LOAD FLAGS(1);		/* __E */
++	code_pointers PT_LOAD FLAGS(6);	/* R__ */
++#endif
+ 	note PT_NOTE FLAGS(0);          /* ___ */
+ }
+ 
+@@ -89,8 +100,11 @@ SECTIONS
+         phys_startup_64 = startup_64 - LOAD_OFFSET;
+ #endif
+ 
++#ifdef CONFIG_KRX
++	VMLINUX_SYMBOL(__krx_sdata) = .;
++#else
+ 	/* Text and read-only data */
+-	.text :  AT(ADDR(.text) - LOAD_OFFSET) {
++	.text : AT(ADDR(.text) - LOAD_OFFSET) {
+ 		_text = .;
+ 		/* bootstrapping code */
+ 		HEAD_TEXT
+@@ -116,8 +130,14 @@ SECTIONS
+ 	/* .text should occupy whole number of pages */
+ 	. = ALIGN(PAGE_SIZE);
+ #endif
++#endif
++
++	/* Read-only data */
+ 	X64_ALIGN_DEBUG_RODATA_BEGIN
+ 	RO_DATA(PAGE_SIZE)
++#ifdef CONFIG_KRX
++	NOTES :rodata :note
++#endif
+ 	X64_ALIGN_DEBUG_RODATA_END
+ 
+ 	/* Data */
+@@ -325,6 +345,56 @@ SECTIONS
+ 		__brk_limit = .;
+ 	}
+ 
++#ifdef CONFIG_KRX
++	VMLINUX_SYMBOL(__krx_edata) = .;
++
++	.krx_phantom : AT(ADDR(.krx_phantom) - LOAD_OFFSET) {
++		*(.krx_phantom)
++	}
++
++	/* Text */
++	.text :  AT(ADDR(.text) - LOAD_OFFSET) {
++		. = ALIGN(PAGE_SIZE);
++		_text = .;
++		/* bootstrapping code */
++		HEAD_TEXT
++		. = ALIGN(8);
++		_stext = .;
++		TEXT_TEXT
++		SCHED_TEXT
++		LOCK_TEXT
++		KPROBES_TEXT
++		ENTRY_TEXT
++		IRQENTRY_TEXT
++		*(.fixup)
++		*(.gnu.warning)
++		/* End of text section */
++		_etext = .;
++	} :text = 0x9090
++
++	/* .text should occupy whole number of pages */
++	. = ALIGN(PAGE_SIZE);
++
++	_start_code_pointers = .;
++	.jmp_tbl : AT(ADDR(.jmp_tbl) - LOAD_OFFSET) {
++		*(bpf_jump_table)
++		*(.jmp_tbls)
++	} : code_pointers = 0x0
++
++	. = ALIGN(PAGE_SIZE);
++	EXCEPTION_TABLE(16) : code_pointers = 0x0
++
++	.pointers : AT(ADDR(.pointers) - LOAD_OFFSET) {
++		*(__tracepoints)
++		. = ALIGN(8);
++		__start___jump_table = .;
++		*(__jump_table)
++		__stop___jump_table = .;
++		. = ALIGN(8);
++	} : code_pointers = 0x0
++	. = ALIGN(PAGE_SIZE);
++	_end_code_pointers = .;
++#endif
+ 	_end = .;
+ 
+         STABS_DEBUG
+diff -uprN linux-3.19/arch/x86/lib/insn.c linux-3.19-krx/arch/x86/lib/insn.c
+--- linux-3.19/arch/x86/lib/insn.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/lib/insn.c	2017-07-23 16:03:47.600993453 -0400
+@@ -44,6 +44,74 @@
+ 
+ #define peek_next(t, insn)	peek_nbyte_next(t, insn, 0)
+ 
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_64)
++#define KRX_INLINE noinline
++#else
++#define KRX_INLINE inline
++#endif
++static KRX_INLINE int
++krx_get_next_char(struct insn *insn, insn_value_t *c)
++{
++	if (unlikely(!validate_next(char, insn, 0)))
++		return 0;
++	*c = __get_next(char, insn);
++	return 1;
++}
++
++static KRX_INLINE int
++krx_get_next_unsigned_short(struct insn *insn, insn_value_t *s)
++{
++	if (unlikely(!validate_next(unsigned short, insn, 0)))
++		return 0;
++	*s = __get_next(unsigned short, insn);
++	return 1;
++}
++
++static KRX_INLINE int
++krx_get_next_short(struct insn *insn, insn_value_t *s)
++{
++	if (unlikely(!validate_next(short, insn, 0)))
++		return 0;
++	*s = __get_next(short, insn);
++	return 1;
++}
++
++static KRX_INLINE int
++krx_get_next_int(struct insn *insn, insn_value_t *s)
++{
++	if (unlikely(!validate_next(int, insn, 0)))
++		return 0;
++	*s = __get_next(int, insn);
++	return 1;
++}
++
++static KRX_INLINE int
++krx_get_next(struct insn *insn, insn_byte_t *b)
++{
++	if (unlikely(!validate_next(insn_byte_t, insn, 0)))
++		return 0;
++	*b = __get_next(insn_byte_t, insn);
++	return 1;
++}
++
++static KRX_INLINE int
++krx_peek_nbyte_next(struct insn *insn, insn_byte_t *b, unsigned char n)
++{
++	if (unlikely(!validate_next(insn_byte_t, insn, n)))
++		return 0;
++	*b = __peek_nbyte_next(insn_byte_t, insn, n);
++	return 1;
++}
++
++static KRX_INLINE int
++krx_peek_next(struct insn *insn, insn_byte_t *b)
++{
++	if (unlikely(!validate_next(insn_byte_t, insn, 0)))
++		return 0;
++	*b = __peek_nbyte_next(insn_byte_t, insn, 0);
++	return 1;
++}
++
+ /**
+  * insn_init() - initialize struct insn
+  * @insn:	&struct insn to be initialized
+@@ -84,7 +152,8 @@ void insn_get_prefixes(struct insn *insn
+ 
+ 	nb = 0;
+ 	lb = 0;
+-	b = peek_next(insn_byte_t, insn);
++	if (!krx_peek_next(insn, &b))
++		goto err_out;
+ 	attr = inat_get_opcode_attribute(b);
+ 	while (inat_is_legacy_prefix(attr)) {
+ 		/* Skip if same prefix */
+@@ -109,7 +178,8 @@ found:
+ 		prefixes->nbytes++;
+ 		insn->next_byte++;
+ 		lb = b;
+-		b = peek_next(insn_byte_t, insn);
++		if (!krx_peek_next(insn, &b))
++			goto err_out;
+ 		attr = inat_get_opcode_attribute(b);
+ 	}
+ 	/* Set the last prefix */
+@@ -126,7 +196,8 @@ found:
+ 
+ 	/* Decode REX prefix */
+ 	if (insn->x86_64) {
+-		b = peek_next(insn_byte_t, insn);
++		 if (!krx_peek_next(insn, &b))
++			goto err_out;
+ 		attr = inat_get_opcode_attribute(b);
+ 		if (inat_is_rex_prefix(attr)) {
+ 			insn->rex_prefix.value = b;
+@@ -140,10 +211,13 @@ found:
+ 	insn->rex_prefix.got = 1;
+ 
+ 	/* Decode VEX prefix */
+-	b = peek_next(insn_byte_t, insn);
++	if (!krx_peek_next(insn, &b))
++		goto err_out;
+ 	attr = inat_get_opcode_attribute(b);
+ 	if (inat_is_vex_prefix(attr)) {
+-		insn_byte_t b2 = peek_nbyte_next(insn_byte_t, insn, 1);
++		insn_byte_t b2;
++		if (!krx_peek_nbyte_next(insn, &b2, 1))
++			goto err_out;
+ 		if (!insn->x86_64) {
+ 			/*
+ 			 * In 32-bits mode, if the [7:6] bits (mod bits of
+@@ -156,7 +230,8 @@ found:
+ 		insn->vex_prefix.bytes[0] = b;
+ 		insn->vex_prefix.bytes[1] = b2;
+ 		if (inat_is_vex3_prefix(attr)) {
+-			b2 = peek_nbyte_next(insn_byte_t, insn, 2);
++			if (!krx_peek_nbyte_next(insn, &b2, 2))
++				goto err_out;
+ 			insn->vex_prefix.bytes[2] = b2;
+ 			insn->vex_prefix.nbytes = 3;
+ 			insn->next_byte += 3;
+@@ -198,7 +273,8 @@ void insn_get_opcode(struct insn *insn)
+ 		insn_get_prefixes(insn);
+ 
+ 	/* Get first opcode */
+-	op = get_next(insn_byte_t, insn);
++	if (!krx_get_next(insn, &op))
++		goto err_out;
+ 	opcode->bytes[0] = op;
+ 	opcode->nbytes = 1;
+ 
+@@ -216,7 +292,8 @@ void insn_get_opcode(struct insn *insn)
+ 	insn->attr = inat_get_opcode_attribute(op);
+ 	while (inat_is_escape(insn->attr)) {
+ 		/* Get escaped opcode */
+-		op = get_next(insn_byte_t, insn);
++		if (!krx_get_next(insn, &op))
++			goto err_out;
+ 		opcode->bytes[opcode->nbytes++] = op;
+ 		pfx_id = insn_last_prefix_id(insn);
+ 		insn->attr = inat_get_escape_attribute(op, pfx_id, insn->attr);
+@@ -248,7 +325,8 @@ void insn_get_modrm(struct insn *insn)
+ 		insn_get_opcode(insn);
+ 
+ 	if (inat_has_modrm(insn->attr)) {
+-		mod = get_next(insn_byte_t, insn);
++		if (!krx_get_next(insn, &mod))
++			goto err_out;
+ 		modrm->value = mod;
+ 		modrm->nbytes = 1;
+ 		if (inat_is_group(insn->attr)) {
+@@ -310,7 +388,8 @@ void insn_get_sib(struct insn *insn)
+ 		modrm = (insn_byte_t)insn->modrm.value;
+ 		if (insn->addr_bytes != 2 &&
+ 		    X86_MODRM_MOD(modrm) != 3 && X86_MODRM_RM(modrm) == 4) {
+-			insn->sib.value = get_next(insn_byte_t, insn);
++			if (!krx_get_next_char(insn, &(insn->sib.value)))
++				goto err_out;
+ 			insn->sib.nbytes = 1;
+ 		}
+ 	}
+@@ -418,12 +497,14 @@ static int __get_immv32(struct insn *ins
+ {
+ 	switch (insn->opnd_bytes) {
+ 	case 2:
+-		insn->immediate.value = get_next(short, insn);
++		if (!krx_get_next_short(insn, &(insn->immediate.value)))
++			goto err_out;
+ 		insn->immediate.nbytes = 2;
+ 		break;
+ 	case 4:
+ 	case 8:
+-		insn->immediate.value = get_next(int, insn);
++		if (!krx_get_next_int(insn, &(insn->immediate.value)))
++			goto err_out;
+ 		insn->immediate.nbytes = 4;
+ 		break;
+ 	default:	/* opnd_bytes must be modified manually */
+@@ -441,17 +522,21 @@ static int __get_immv(struct insn *insn)
+ {
+ 	switch (insn->opnd_bytes) {
+ 	case 2:
+-		insn->immediate1.value = get_next(short, insn);
++		if (!krx_get_next_short(insn, &(insn->immediate1.value)))
++			goto err_out;
+ 		insn->immediate1.nbytes = 2;
+ 		break;
+ 	case 4:
+-		insn->immediate1.value = get_next(int, insn);
++		if (!krx_get_next_int(insn, &(insn->immediate1.value)))
++			goto err_out;
+ 		insn->immediate1.nbytes = 4;
+ 		break;
+ 	case 8:
+-		insn->immediate1.value = get_next(int, insn);
++		if (!krx_get_next_int(insn, &(insn->immediate1.value)))
++			goto err_out;
++		if (!krx_get_next_int(insn, &(insn->immediate2.value)))
++			goto err_out;
+ 		insn->immediate1.nbytes = 4;
+-		insn->immediate2.value = get_next(int, insn);
+ 		insn->immediate2.nbytes = 4;
+ 		break;
+ 	default:	/* opnd_bytes must be modified manually */
+@@ -469,11 +554,13 @@ static int __get_immptr(struct insn *ins
+ {
+ 	switch (insn->opnd_bytes) {
+ 	case 2:
+-		insn->immediate1.value = get_next(short, insn);
++		if (!krx_get_next_short(insn, &(insn->immediate1.value)))
++			goto err_out;
+ 		insn->immediate1.nbytes = 2;
+ 		break;
+ 	case 4:
+-		insn->immediate1.value = get_next(int, insn);
++		if (!krx_get_next_int(insn, &(insn->immediate1.value)))
++			goto err_out;
+ 		insn->immediate1.nbytes = 4;
+ 		break;
+ 	case 8:
+@@ -482,7 +569,8 @@ static int __get_immptr(struct insn *ins
+ 	default:	/* opnd_bytes must be modified manually */
+ 		goto err_out;
+ 	}
+-	insn->immediate2.value = get_next(unsigned short, insn);
++	if (!krx_get_next_unsigned_short(insn, &(insn->immediate2.value)))
++		goto err_out;
+ 	insn->immediate2.nbytes = 2;
+ 	insn->immediate1.got = insn->immediate2.got = 1;
+ 
+@@ -519,21 +607,26 @@ void insn_get_immediate(struct insn *ins
+ 
+ 	switch (inat_immediate_size(insn->attr)) {
+ 	case INAT_IMM_BYTE:
+-		insn->immediate.value = get_next(char, insn);
++		if (!krx_get_next_char(insn, &(insn->immediate.value)))
++			goto err_out;
+ 		insn->immediate.nbytes = 1;
+ 		break;
+ 	case INAT_IMM_WORD:
+-		insn->immediate.value = get_next(short, insn);
++		if (!krx_get_next_short(insn, &(insn->immediate.value)))
++			goto err_out;
+ 		insn->immediate.nbytes = 2;
+ 		break;
+ 	case INAT_IMM_DWORD:
+-		insn->immediate.value = get_next(int, insn);
++		if (!krx_get_next_int(insn, &(insn->immediate.value)))
++			goto err_out;
+ 		insn->immediate.nbytes = 4;
+ 		break;
+ 	case INAT_IMM_QWORD:
+-		insn->immediate1.value = get_next(int, insn);
++		if (!krx_get_next_int(insn, &(insn->immediate1.value)))
++			goto err_out;
++		if (!krx_get_next_int(insn, &(insn->immediate2.value)))
++			goto err_out;
+ 		insn->immediate1.nbytes = 4;
+-		insn->immediate2.value = get_next(int, insn);
+ 		insn->immediate2.nbytes = 4;
+ 		break;
+ 	case INAT_IMM_PTR:
+@@ -553,7 +646,8 @@ void insn_get_immediate(struct insn *ins
+ 		goto err_out;
+ 	}
+ 	if (inat_has_second_immediate(insn->attr)) {
+-		insn->immediate2.value = get_next(char, insn);
++		if (!krx_get_next_char(insn, &(insn->immediate2.value)))
++			goto err_out;
+ 		insn->immediate2.nbytes = 1;
+ 	}
+ done:
+diff -uprN linux-3.19/arch/x86/mm/dump_pagetables.c linux-3.19-krx/arch/x86/mm/dump_pagetables.c
+--- linux-3.19/arch/x86/mm/dump_pagetables.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/dump_pagetables.c	2017-07-23 16:03:47.368993443 -0400
+@@ -51,6 +51,12 @@ enum address_markers_idx {
+ # ifdef CONFIG_X86_ESPFIX64
+ 	ESPFIX_START_NR,
+ # endif
++#ifdef CONFIG_KRX
++	MODULES_DATA_VADDR_NR,
++	MODULES_DATA_END_NR,
++	FIXADDR_START_NR,
++	FIXADDR_END_NR,
++#endif
+ 	HIGH_KERNEL_NR,
+ 	MODULES_VADDR_NR,
+ 	MODULES_END_NR,
+@@ -60,8 +66,17 @@ enum address_markers_idx {
+ 	VMALLOC_END_NR,
+ # ifdef CONFIG_HIGHMEM
+ 	PKMAP_BASE_NR,
++#ifdef CONFIG_KRX
++	PKMAP_END_NR,
++#endif
+ # endif
+ 	FIXADDR_START_NR,
++#ifdef CONFIG_KRX
++	FIXADDR_END_NR,
++	HIGH_KERNEL_NR,
++	MODULES_VADDR_NR,
++	MODULES_END_NR,
++#endif
+ #endif
+ };
+ 
+@@ -79,17 +94,37 @@ static struct addr_marker address_marker
+ # ifdef CONFIG_EFI
+ 	{ EFI_VA_END,		"EFI Runtime Services" },
+ # endif
++#ifdef CONFIG_KRX
++	{ MODULES_DATA_VADDR,	"Modules Data" },
++	{ MODULES_DATA_END,	"Modules Data End" },
++	{ FIXADDR_START,        "Fixmap Area" },
++	{ FIXADDR_TOP,          "Fixmap Area End" },
++#endif
+ 	{ __START_KERNEL_map,   "High Kernel Mapping" },
++#ifdef CONFIG_KRX
++	{ MODULES_VADDR,        "Modules Text" },
++	{ MODULES_END,          "Modules Text End" },
++#else
+ 	{ MODULES_VADDR,        "Modules" },
+ 	{ MODULES_END,          "End Modules" },
++#endif
+ #else
+ 	{ PAGE_OFFSET,          "Kernel Mapping" },
+ 	{ 0/* VMALLOC_START */, "vmalloc() Area" },
+ 	{ 0/*VMALLOC_END*/,     "vmalloc() End" },
+ # ifdef CONFIG_HIGHMEM
+ 	{ 0/*PKMAP_BASE*/,      "Persisent kmap() Area" },
++#ifdef	CONFIG_KRX
++	{ 0/*PKMAP_END*/,       "Persisent kmap() Area End" },
++#endif
+ # endif
+ 	{ 0/*FIXADDR_START*/,   "Fixmap Area" },
++#ifdef CONFIG_KRX
++	{ 0/*FIXADDR_END*/,     "Fixmap Area End" },
++	{ KERNEL_START,         "High Kernel Mapping" },
++	{ 0/*MODULES_VADDR*/,   "Modules Text" },
++	{ 0/*MODULES_END*/,     "Modules Text End" },
++#endif
+ #endif
+ 	{ -1, NULL }		/* End of list */
+ };
+@@ -127,7 +162,7 @@ static void printk_prot(struct seq_file
+ 	static const char * const level_name[] =
+ 		{ "cr3", "pgd", "pud", "pmd", "pte" };
+ 
+-	if (!pgprot_val(prot)) {
++	if (!(pr & _PAGE_PRESENT)) {
+ 		/* Not present */
+ 		pt_dump_cont_printf(m, dmsg, "                              ");
+ 	} else {
+@@ -404,12 +439,21 @@ static int pt_dump_init(void)
+ 
+ #ifdef CONFIG_X86_32
+ 	/* Not a compile-time constant on x86-32 */
+-	address_markers[VMALLOC_START_NR].start_address = VMALLOC_START;
+-	address_markers[VMALLOC_END_NR].start_address = VMALLOC_END;
++	address_markers[VMALLOC_START_NR].start_address	= VMALLOC_START;
++	address_markers[VMALLOC_END_NR].start_address	= VMALLOC_END;
+ # ifdef CONFIG_HIGHMEM
+-	address_markers[PKMAP_BASE_NR].start_address = PKMAP_BASE;
++	address_markers[PKMAP_BASE_NR].start_address	= PKMAP_BASE;
++#ifdef CONFIG_KRX
++	address_markers[PKMAP_END_NR].start_address	=
++				(PKMAP_BASE + PAGE_SIZE * LAST_PKMAP);
++#endif
+ # endif
+-	address_markers[FIXADDR_START_NR].start_address = FIXADDR_START;
++	address_markers[FIXADDR_START_NR].start_address	= FIXADDR_START;
++#ifdef CONFIG_KRX
++	address_markers[FIXADDR_END_NR].start_address	= FIXADDR_TOP;
++	address_markers[MODULES_VADDR_NR].start_address	= MODULES_VADDR;
++	address_markers[MODULES_END_NR].start_address	= MODULES_END;
++#endif
+ #endif
+ 
+ 	pe = debugfs_create_file("kernel_page_tables", 0600, NULL, NULL,
+diff -uprN linux-3.19/arch/x86/mm/extable.c linux-3.19-krx/arch/x86/mm/extable.c
+--- linux-3.19/arch/x86/mm/extable.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/extable.c	2017-07-23 16:41:01.393079972 -0400
+@@ -3,12 +3,20 @@
+ #include <linux/sort.h>
+ #include <asm/uaccess.h>
+ 
++#ifdef	CONFIG_KRX
++static noinline unsigned long
++#else
+ static inline unsigned long
++#endif
+ ex_insn_addr(const struct exception_table_entry *x)
+ {
+ 	return (unsigned long)&x->insn + x->insn;
+ }
++#ifdef	CONFIG_KRX
++static noinline unsigned long
++#else
+ static inline unsigned long
++#endif
+ ex_fixup_addr(const struct exception_table_entry *x)
+ {
+ 	return (unsigned long)&x->fixup + x->fixup;
+@@ -37,10 +45,10 @@ int fixup_exception(struct pt_regs *regs
+ 	if (fixup) {
+ 		new_ip = ex_fixup_addr(fixup);
+ 
+-		if (fixup->fixup - fixup->insn >= 0x7ffffff0 - 4) {
++		if (fixup->fixup - fixup->insn >= 0x2ffffff0 - 4) {
+ 			/* Special hack for uaccess_err */
+ 			current_thread_info()->uaccess_err = 1;
+-			new_ip -= 0x7ffffff0;
++			new_ip -= 0x2ffffff0;
+ 		}
+ 		regs->ip = new_ip;
+ 		return 1;
+@@ -59,7 +67,7 @@ int __init early_fixup_exception(unsigne
+ 	if (fixup) {
+ 		new_ip = ex_fixup_addr(fixup);
+ 
+-		if (fixup->fixup - fixup->insn >= 0x7ffffff0 - 4) {
++		if (fixup->fixup - fixup->insn >= 0x2ffffff0 - 4) {
+ 			/* uaccess handling not supported during early boot */
+ 			return 0;
+ 		}
+diff -uprN linux-3.19/arch/x86/mm/fault.c linux-3.19-krx/arch/x86/mm/fault.c
+--- linux-3.19/arch/x86/mm/fault.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/fault.c	2017-07-23 16:03:47.368993443 -0400
+@@ -268,7 +268,8 @@ static noinline int vmalloc_fault(unsign
+ 	pte_t *pte_k;
+ 
+ 	/* Make sure we are in vmalloc area: */
+-	if (!(address >= VMALLOC_START && address < VMALLOC_END))
++	if (!(address >= VMALLOC_START && address < VMALLOC_END)
++		&& !(address >= MODULES_VADDR && address < MODULES_END))
+ 		return -1;
+ 
+ 	WARN_ON_ONCE(in_nmi());
+diff -uprN linux-3.19/arch/x86/mm/init_32.c linux-3.19-krx/arch/x86/mm/init_32.c
+--- linux-3.19/arch/x86/mm/init_32.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/init_32.c	2017-07-23 16:03:47.340993444 -0400
+@@ -237,11 +237,129 @@ page_table_range_init(unsigned long star
+ 
+ static inline int is_kernel_text(unsigned long addr)
+ {
++#ifdef	CONFIG_KRX
++#define KERNEL_RELOC_DELTA	(__START_KERNEL_map - PAGE_OFFSET)
++	if (	((addr >= (unsigned long)__init_begin)			&&
++			(addr <= (unsigned long)_etext))	||
++	((addr >= (unsigned long)__init_begin - KERNEL_RELOC_DELTA)	&&
++	 		(addr <= (unsigned long)_etext - KERNEL_RELOC_DELTA)))
++		return 1;
++#else
+ 	if (addr >= (unsigned long)_text && addr <= (unsigned long)__init_end)
+ 		return 1;
++#endif
+ 	return 0;
+ }
+ 
++#ifdef	CONFIG_KRX
++/* 
++ * Convert the 4K pages of the kernel image (set by `head_32.S') to 2MB pages,
++ * to avoid sharing the same PTEs with the physmap region of the kernel image.
++ */
++void __init init_krx_mapping(unsigned long start, unsigned long end)
++{
++	int		use_pse			= 1;
++	pgd_t		*pgd_base		= swapper_pg_dir;
++	pgd_t		*pgd = NULL, *pgd_dst	= NULL;
++	pmd_t		*pmd = NULL, *pmd_dst	= NULL;
++	pte_t 		*pte			= NULL;
++	int		pgd_idx = 0, pmd_idx	= 0;
++	unsigned long	pfn = 0, last_mapped	= 0;
++	int		mapping_iter		= 0;
++	unsigned	pages_2m = 0, pages_4k	= 0;
++	void		*src			= NULL;
++
++	if (!cpu_has_pse)
++		use_pse = 0;
++
++	mapping_iter = 1;
++
++repeat:
++	pages_2m = pages_4k	= 0;
++	last_mapped		= start;
++	pgd_idx			= pgd_index(start);
++	pgd			= pgd_base + pgd_idx;
++	for (; pgd_idx < PTRS_PER_PGD; pgd++, pgd_idx++) {
++		if (last_mapped >= end)
++			continue;
++		pmd = one_md_table_init(pgd);
++#ifdef	CONFIG_X86_PAE
++		pmd_idx = pmd_index(start);
++		pmd += pmd_idx;
++#else
++		pmd_idx = 0;
++#endif
++		for (; pmd_idx < PTRS_PER_PMD && last_mapped < end;
++			pmd++, pmd_idx++) {
++			if (use_pse) {
++				/* 2MB pages (PAE)
++				 *
++				 * Make everything executable to avoid aligning 
++				 * `__init_beging'. Proper permissions will be
++				 * set in `mark_rodata_ro'.
++				*/
++				pgprot_t prot = PAGE_KERNEL_LARGE_EXEC;
++				pgprot_t init_prot =
++					__pgprot(PTE_IDENT_ATTR | _PAGE_PSE);
++				/* 
++				 * In the first round, we obtain the PFN from
++				 * the pre-set PTEs. In the second round, we
++				 * obtain it from the (new) PMD.
++				 */
++				if (mapping_iter == 1) {
++					pte = one_page_table_init(pmd);
++					pfn = pte_pfn(*pte);
++				}
++				else
++					pfn = pmd_pfn(*pmd);
++				pfn &= PMD_MASK >> PAGE_SHIFT;
++				pages_2m++;
++				if (mapping_iter == 1)
++					set_pmd(pmd, pfn_pmd(pfn, init_prot));
++				else
++					set_pmd(pmd, pfn_pmd(pfn, prot));
++				last_mapped += (PTRS_PER_PTE * PAGE_SIZE);
++				continue;
++			}	
++			/*
++			 * 4KB pages (!PAE)
++			 *
++			 * We need to copy the entries from the original PMD/PTE
++			 * page to the new one. No need for a second round
++			 * because `init_mem_mapping' has already set up the
++			 * correct permissions.
++			 */
++			pte = (pte_t *)alloc_low_page();
++			src = pfn_to_kaddr(pmd_pfn(*pmd));
++			memcpy(pte, src, PAGE_SIZE);
++			/* Set the physmap entries to point to the new page. */
++			pgd_dst = pgd_base +
++				pgd_index((unsigned long)__va(__pa(last_mapped)));
++			pmd_dst		= one_md_table_init(pgd_dst);
++			paravirt_alloc_pte(&init_mm, __pa(pte) >> PAGE_SHIFT);
++			set_pmd(pmd_dst, __pmd(__pa(pte) | _PAGE_TABLE));
++			pages_4k	+= PTRS_PER_PTE;
++			last_mapped	+= (PTRS_PER_PTE * PAGE_SIZE);
++		}
++	}
++	if (mapping_iter == 1) {
++		/*
++		 * Update direct mapping page count
++		 * only in the first iteration.
++		 */
++		update_page_count(PG_LEVEL_2M, pages_2m);
++		update_page_count(PG_LEVEL_4K, pages_4k);
++
++		__flush_tlb_all();
++		mapping_iter = 2;
++		if (!use_pse)
++			/* No need to modify permissions. */
++			return;
++		goto repeat;
++	}
++}
++#endif
++
+ /*
+  * This maps the physical memory to kernel virtual address space, a total
+  * of max_low_pfn pages, by creating page tables starting from address
+@@ -759,6 +877,35 @@ void __init mem_init(void)
+ 	after_bootmem = 1;
+ 
+ 	mem_init_print_info(NULL);
++#ifdef CONFIG_KRX
++	printk(KERN_INFO "virtual kernel memory layout:\n"
++		"      .text : 0x%08lx - 0x%08lx   (%4ld kB)\n"
++		"      .init : 0x%08lx - 0x%08lx   (%4ld kB)\n"
++		"      .data : 0x%08lx - 0x%08lx   (%4ld kB)\n"
++		"    fixmap  : 0x%08lx - 0x%08lx   (%4ld kB)\n"
++#ifdef CONFIG_HIGHMEM
++		"    pkmap   : 0x%08lx - 0x%08lx   (%4ld kB)\n"
++#endif
++		"    vmalloc : 0x%08lx - 0x%08lx   (%4ld MB)\n"
++		"    lowmem  : 0x%08lx - 0x%08lx   (%4ld MB)\n",
++		(unsigned long)&_text, (unsigned long)&_etext,
++		((unsigned long)&_etext - (unsigned long)&_text) >> 10,
++		(unsigned long)&__init_begin, (unsigned long)&__init_end,
++		((unsigned long)&__init_end -
++		 (unsigned long)&__init_begin) >> 10,
++		(unsigned long)&_sdata, (unsigned long)&_edata,
++		((unsigned long)&_edata - (unsigned long)&_sdata) >> 10,
++		FIXADDR_START, FIXADDR_TOP,
++		(FIXADDR_TOP - FIXADDR_START) >> 10,
++#ifdef CONFIG_HIGHMEM
++		PKMAP_BASE, PKMAP_BASE+LAST_PKMAP*PAGE_SIZE,
++		(LAST_PKMAP*PAGE_SIZE) >> 10,
++#endif
++		VMALLOC_START, VMALLOC_END,
++		(VMALLOC_END - VMALLOC_START) >> 20,
++		(unsigned long)__va(0), (unsigned long)high_memory,
++		((unsigned long)high_memory - (unsigned long)__va(0)) >> 20);
++#else
+ 	printk(KERN_INFO "virtual kernel memory layout:\n"
+ 		"    fixmap  : 0x%08lx - 0x%08lx   (%4ld kB)\n"
+ #ifdef CONFIG_HIGHMEM
+@@ -792,6 +939,7 @@ void __init mem_init(void)
+ 
+ 		(unsigned long)&_text, (unsigned long)&_etext,
+ 		((unsigned long)&_etext - (unsigned long)&_text) >> 10);
++#endif
+ 
+ 	/*
+ 	 * Check boundaries twice: Some fundamental inconsistencies can
+@@ -887,7 +1035,7 @@ void set_kernel_text_rw(void)
+ 	pr_debug("Set kernel text: %lx - %lx for read write\n",
+ 		 start, start+size);
+ 
+-	set_pages_rw(virt_to_page(start), size >> PAGE_SHIFT);
++	set_memory_rw(start, size >> PAGE_SHIFT);
+ }
+ 
+ void set_kernel_text_ro(void)
+@@ -901,7 +1049,7 @@ void set_kernel_text_ro(void)
+ 	pr_debug("Set kernel text: %lx - %lx for read only\n",
+ 		 start, start+size);
+ 
+-	set_pages_ro(virt_to_page(start), size >> PAGE_SHIFT);
++	set_memory_ro(start, size >> PAGE_SHIFT);
+ }
+ 
+ static void mark_nxdata_nx(void)
+@@ -910,15 +1058,31 @@ static void mark_nxdata_nx(void)
+ 	 * When this called, init has already been executed and released,
+ 	 * so everything past _etext should be NX.
+ 	 */
+-	unsigned long start = PFN_ALIGN(_etext);
++#ifdef CONFIG_KRX
++	unsigned long start	= PFN_ALIGN(__krx_sdata);
++	unsigned long pstart	= start - __START_KERNEL_map + PAGE_OFFSET;
++	unsigned long size	= PFN_ALIGN(__krx_edata) - start;
++#else
++	unsigned long start	= PFN_ALIGN(_etext);
+ 	/*
+ 	 * This comes from is_kernel_text upper limit. Also HPAGE where used:
+ 	 */
+-	unsigned long size = (((unsigned long)__init_end + HPAGE_SIZE) & HPAGE_MASK) - start;
++	unsigned long size =
++		(((unsigned long)__init_end + HPAGE_SIZE) & HPAGE_MASK) - start;
++#endif
+ 
+ 	if (__supported_pte_mask & _PAGE_NX)
+ 		printk(KERN_INFO "NX-protecting the kernel data: %luk\n", size >> 10);
+-	set_pages_nx(virt_to_page(start), size >> PAGE_SHIFT);
++	set_memory_nx(start, size >> PAGE_SHIFT);
++#ifdef CONFIG_KRX
++	/* set NX in the physmap region */
++	set_memory_nx(pstart, size >> PAGE_SHIFT);
++
++	/* set NX in the region beyond end */
++	start = PFN_ALIGN((unsigned long)_end) - __START_KERNEL_map + PAGE_OFFSET;
++	size = PFN_ALIGN(max_init_mapped) - PFN_ALIGN((unsigned long)_end);
++	set_memory_nx(start, size >> PAGE_SHIFT);
++#endif
+ }
+ 
+ void mark_rodata_ro(void)
+@@ -926,7 +1090,7 @@ void mark_rodata_ro(void)
+ 	unsigned long start = PFN_ALIGN(_text);
+ 	unsigned long size = PFN_ALIGN(_etext) - start;
+ 
+-	set_pages_ro(virt_to_page(start), size >> PAGE_SHIFT);
++	set_memory_ro(start, size >> PAGE_SHIFT);
+ 	printk(KERN_INFO "Write protecting the kernel text: %luk\n",
+ 		size >> 10);
+ 
+@@ -935,25 +1099,30 @@ void mark_rodata_ro(void)
+ #ifdef CONFIG_CPA_DEBUG
+ 	printk(KERN_INFO "Testing CPA: Reverting %lx-%lx\n",
+ 		start, start+size);
+-	set_pages_rw(virt_to_page(start), size>>PAGE_SHIFT);
++	set_memory_rw(start, size >> PAGE_SHIFT);
+ 
+ 	printk(KERN_INFO "Testing CPA: write protecting again\n");
+-	set_pages_ro(virt_to_page(start), size>>PAGE_SHIFT);
++	set_memory_ro(start, size >> PAGE_SHIFT);
+ #endif
+ 
+-	start += size;
+-	size = (unsigned long)__end_rodata - start;
+-	set_pages_ro(virt_to_page(start), size >> PAGE_SHIFT);
++#ifdef CONFIG_KRX
++	start	= PFN_ALIGN(__krx_sdata);
++	size	= PFN_ALIGN((unsigned long)__stop___ex_table) - start;
++#else
++	start	+= size;
++	size	= (unsigned long)__end_rodata - start;
++#endif
++	set_memory_ro(start, size >> PAGE_SHIFT);
+ 	printk(KERN_INFO "Write protecting the kernel read-only data: %luk\n",
+ 		size >> 10);
+ 	rodata_test();
+ 
+ #ifdef CONFIG_CPA_DEBUG
+ 	printk(KERN_INFO "Testing CPA: undo %lx-%lx\n", start, start + size);
+-	set_pages_rw(virt_to_page(start), size >> PAGE_SHIFT);
++	set_memory_rw(start, size >> PAGE_SHIFT);
+ 
+ 	printk(KERN_INFO "Testing CPA: write protecting again\n");
+-	set_pages_ro(virt_to_page(start), size >> PAGE_SHIFT);
++	set_memory_ro(start, size >> PAGE_SHIFT);
+ #endif
+ 	mark_nxdata_nx();
+ }
+diff -uprN linux-3.19/arch/x86/mm/init_64.c linux-3.19-krx/arch/x86/mm/init_64.c
+--- linux-3.19/arch/x86/mm/init_64.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/init_64.c	2017-07-23 16:03:47.372993444 -0400
+@@ -391,9 +391,15 @@ void __init init_extra_mapping_uc(unsign
+  */
+ void __init cleanup_highmap(void)
+ {
+-	unsigned long vaddr = __START_KERNEL_map;
+-	unsigned long vaddr_end = __START_KERNEL_map + KERNEL_IMAGE_SIZE;
+-	unsigned long end = roundup((unsigned long)_brk_end, PMD_SIZE) - 1;
++	unsigned long vaddr	= __START_KERNEL_map;
++	unsigned long vaddr_end	= __START_KERNEL_map + KERNEL_IMAGE_SIZE;
++#ifdef CONFIG_KRX
++	unsigned long start	= (unsigned long)__krx_sdata;
++	unsigned long end	= roundup((unsigned long)_end, PMD_SIZE) - 1;
++#else
++	unsigned long start	= (unsigned long)_text;
++	unsigned long end	= roundup((unsigned long)_brk_end, PMD_SIZE) - 1;
++#endif
+ 	pmd_t *pmd = level2_kernel_pgt;
+ 
+ 	/*
+@@ -407,7 +413,7 @@ void __init cleanup_highmap(void)
+ 	for (; vaddr + PMD_SIZE - 1 < vaddr_end; pmd++, vaddr += PMD_SIZE) {
+ 		if (pmd_none(*pmd))
+ 			continue;
+-		if (vaddr < (unsigned long) _text || vaddr > end)
++		if (vaddr < start || vaddr > end)
+ 			set_pmd(pmd, __pmd(0));
+ 	}
+ }
+@@ -1085,7 +1091,11 @@ int kernel_set_to_readonly;
+ void set_kernel_text_rw(void)
+ {
+ 	unsigned long start = PFN_ALIGN(_text);
++#ifdef CONFIG_KRX
++	unsigned long end = PFN_ALIGN(_etext);
++#else
+ 	unsigned long end = PFN_ALIGN(__stop___ex_table);
++#endif
+ 
+ 	if (!kernel_set_to_readonly)
+ 		return;
+@@ -1104,7 +1114,11 @@ void set_kernel_text_rw(void)
+ void set_kernel_text_ro(void)
+ {
+ 	unsigned long start = PFN_ALIGN(_text);
++#ifdef CONFIG_KRX
++	unsigned long end = PFN_ALIGN(_etext);
++#else
+ 	unsigned long end = PFN_ALIGN(__stop___ex_table);
++#endif
+ 
+ 	if (!kernel_set_to_readonly)
+ 		return;
+@@ -1118,17 +1132,51 @@ void set_kernel_text_ro(void)
+ 	set_memory_ro(start, (end - start) >> PAGE_SHIFT);
+ }
+ 
++#ifdef	CONFIG_KRX
++void remove_synonyms(void *base, unsigned long size)
++{
++	void *paddr = NULL;
++	pte_t *ptep;
++	int level;
++
++	while (size > 0)
++	{
++		ptep = lookup_address((unsigned long)base, &level);
++		if (ptep == NULL)
++			BUG();
++		paddr = pfn_to_kaddr(pte_pfn(*ptep));
++		_set_memory_np((unsigned long) paddr, 1);
++		base += PAGE_SIZE;
++		size -= PAGE_SIZE;
++	}
++}
++#endif
++
+ void mark_rodata_ro(void)
+ {
+-	unsigned long start = PFN_ALIGN(_text);
+-	unsigned long rodata_start = PFN_ALIGN(__start_rodata);
++#ifdef CONFIG_KRX
++	unsigned long start		= PFN_ALIGN(__krx_sdata);
++	unsigned long text_start	= PFN_ALIGN(_text);
++	unsigned long text_end		= PFN_ALIGN(&__stop___ex_table);
++	unsigned long rodata_end	= PFN_ALIGN(&__end_rodata);
++#else
++	unsigned long start		= PFN_ALIGN(_text);
++	unsigned long rodata_start	= PFN_ALIGN(__start_rodata);
++	unsigned long text_end		= PFN_ALIGN(&__stop___ex_table);
++	unsigned long rodata_end	= PFN_ALIGN(&__end_rodata);
++#endif
++	
+ 	unsigned long end = (unsigned long) &__end_rodata_hpage_align;
+-	unsigned long text_end = PFN_ALIGN(&__stop___ex_table);
+-	unsigned long rodata_end = PFN_ALIGN(&__end_rodata);
+ 	unsigned long all_end;
+-
++	
++#ifdef CONFIG_KRX
++	printk(KERN_INFO "Write protecting the kernel read-only data: %luk\n",
++		((end - start) >> 10) + ((text_end - text_start) >> 10));
++	set_memory_ro(text_start, (text_end - text_start) >> PAGE_SHIFT);
++#else
+ 	printk(KERN_INFO "Write protecting the kernel read-only data: %luk\n",
+-	       (end - start) >> 10);
++		(end - start) >> 10);
++#endif
+ 	set_memory_ro(start, (end - start) >> PAGE_SHIFT);
+ 
+ 	kernel_set_to_readonly = 1;
+@@ -1145,8 +1193,13 @@ void mark_rodata_ro(void)
+ 	 * Any PMD which was setup after the one which covers _brk_end
+ 	 * has been zapped already via cleanup_highmem().
+ 	 */
++#ifdef CONFIG_KRX
++	all_end = roundup((unsigned long)__krx_edata, PMD_SIZE);
++	set_memory_nx(start, (all_end - start) >> PAGE_SHIFT);
++#else
+ 	all_end = roundup((unsigned long)_brk_end, PMD_SIZE);
+ 	set_memory_nx(rodata_start, (all_end - rodata_start) >> PAGE_SHIFT);
++#endif
+ 
+ 	rodata_test();
+ 
+@@ -1158,12 +1211,18 @@ void mark_rodata_ro(void)
+ 	set_memory_ro(start, (end-start) >> PAGE_SHIFT);
+ #endif
+ 
++#ifndef CONFIG_KRX
+ 	free_init_pages("unused kernel",
+ 			(unsigned long) __va(__pa_symbol(text_end)),
+ 			(unsigned long) __va(__pa_symbol(rodata_start)));
++#endif
+ 	free_init_pages("unused kernel",
+ 			(unsigned long) __va(__pa_symbol(rodata_end)),
+ 			(unsigned long) __va(__pa_symbol(_sdata)));
++#ifdef	CONFIG_KRX
++	remove_synonyms(_start_code_pointers,
++			_end_code_pointers - _start_code_pointers);
++#endif
+ }
+ 
+ #endif
+diff -uprN linux-3.19/arch/x86/mm/init.c linux-3.19-krx/arch/x86/mm/init.c
+--- linux-3.19/arch/x86/mm/init.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/init.c	2017-07-23 16:03:47.252993439 -0400
+@@ -159,7 +159,8 @@ static void __init probe_page_size_mask(
+ {
+ 	init_gbpages();
+ 
+-#if !defined(CONFIG_DEBUG_PAGEALLOC) && !defined(CONFIG_KMEMCHECK)
++#if	!defined(CONFIG_DEBUG_PAGEALLOC)	&&	\
++	!defined(CONFIG_KMEMCHECK)
+ 	/*
+ 	 * For CONFIG_DEBUG_PAGEALLOC, identity mapping will use small pages.
+ 	 * This will simplify cpa(), which otherwise needs to support splitting
+@@ -593,6 +594,7 @@ void __init init_mem_mapping(void)
+ 		max_low_pfn = max_pfn;
+ 	}
+ #else
++	init_krx_mapping((unsigned long)KERNEL_START, (unsigned long)_end);
+ 	early_ioremap_page_table_range_init();
+ #endif
+ 
+diff -uprN linux-3.19/arch/x86/mm/ioremap.c linux-3.19-krx/arch/x86/mm/ioremap.c
+--- linux-3.19/arch/x86/mm/ioremap.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/ioremap.c	2017-07-23 16:03:47.320993443 -0400
+@@ -357,16 +357,23 @@ void unxlate_dev_mem_ptr(phys_addr_t phy
+ 
+ static pte_t bm_pte[PAGE_SIZE/sizeof(pte_t)] __page_aligned_bss;
+ 
+-static inline pmd_t * __init early_ioremap_pmd(unsigned long addr)
++static inline pmd_t * __init
++___early_ioremap_pmd(unsigned long addr, bool reloc)
+ {
+ 	/* Don't assume we're using swapper_pg_dir at this point */
+-	pgd_t *base = __va(read_cr3());
++	pgd_t *base = (reloc) ? __va_reloc(read_cr3()) : __va(read_cr3());
+ 	pgd_t *pgd = &base[pgd_index(addr)];
+ 	pud_t *pud = pud_offset(pgd, addr);
+ 	pmd_t *pmd = pmd_offset(pud, addr);
+ 
+ 	return pmd;
+ }
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_32)
++#define	__early_ioremap_pmd(addr)	___early_ioremap_pmd(addr, true)
++#else
++#define	__early_ioremap_pmd(addr)	___early_ioremap_pmd(addr, false)
++#endif
++#define early_ioremap_pmd(addr)		___early_ioremap_pmd(addr, false)
+ 
+ static inline pte_t * __init early_ioremap_pte(unsigned long addr)
+ {
+@@ -390,7 +397,7 @@ void __init early_ioremap_init(void)
+ 
+ 	early_ioremap_setup();
+ 
+-	pmd = early_ioremap_pmd(fix_to_virt(FIX_BTMAP_BEGIN));
++	pmd = __early_ioremap_pmd(fix_to_virt(FIX_BTMAP_BEGIN));
+ 	memset(bm_pte, 0, sizeof(bm_pte));
+ 	pmd_populate_kernel(&init_mm, pmd, bm_pte);
+ 
+@@ -402,10 +409,10 @@ void __init early_ioremap_init(void)
+ 	BUILD_BUG_ON((__fix_to_virt(FIX_BTMAP_BEGIN) >> PMD_SHIFT)
+ 		     != (__fix_to_virt(FIX_BTMAP_END) >> PMD_SHIFT));
+ #undef __FIXADDR_TOP
+-	if (pmd != early_ioremap_pmd(fix_to_virt(FIX_BTMAP_END))) {
++	if (pmd != __early_ioremap_pmd(fix_to_virt(FIX_BTMAP_END))) {
+ 		WARN_ON(1);
+ 		printk(KERN_WARNING "pmd %p != %p\n",
+-		       pmd, early_ioremap_pmd(fix_to_virt(FIX_BTMAP_END)));
++		       pmd, __early_ioremap_pmd(fix_to_virt(FIX_BTMAP_END)));
+ 		printk(KERN_WARNING "fix_to_virt(FIX_BTMAP_BEGIN): %08lx\n",
+ 			fix_to_virt(FIX_BTMAP_BEGIN));
+ 		printk(KERN_WARNING "fix_to_virt(FIX_BTMAP_END):   %08lx\n",
+diff -uprN linux-3.19/arch/x86/mm/pageattr.c linux-3.19-krx/arch/x86/mm/pageattr.c
+--- linux-3.19/arch/x86/mm/pageattr.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/pageattr.c	2017-07-23 16:03:47.252993439 -0400
+@@ -1337,10 +1337,10 @@ static int __change_page_attr_set_clr(st
+ 	return 0;
+ }
+ 
+-static int change_page_attr_set_clr(unsigned long *addr, int numpages,
++static int ___change_page_attr_set_clr(unsigned long *addr, int numpages,
+ 				    pgprot_t mask_set, pgprot_t mask_clr,
+ 				    int force_split, int in_flag,
+-				    struct page **pages)
++				    struct page **pages, int chkalias_override)
+ {
+ 	struct cpa_data cpa;
+ 	int ret, cache, checkalias;
+@@ -1403,7 +1403,9 @@ static int change_page_attr_set_clr(unsi
+ 		cpa.flags |= in_flag;
+ 
+ 	/* No alias checking for _NX bit modifications */
+-	checkalias = (pgprot_val(mask_set) | pgprot_val(mask_clr)) != _PAGE_NX;
++	checkalias =
++		(((pgprot_val(mask_set) | pgprot_val(mask_clr)) != _PAGE_NX) &&
++			chkalias_override);
+ 
+ 	ret = __change_page_attr_set_clr(&cpa, checkalias);
+ 
+@@ -1438,6 +1440,21 @@ out:
+ 	return ret;
+ }
+ 
++#define change_page_attr_set_clr(addr,		\
++				numpages,	\
++				mask_set,	\
++				mask_clr,	\
++				force_split,	\
++				in_flag,	\
++				pages)		\
++	___change_page_attr_set_clr(addr,	\
++				numpages,	\
++				mask_set,	\
++				mask_clr,	\
++				force_split,	\
++				in_flag,	\
++				pages, 1)
++
+ static inline int change_page_attr_set(unsigned long *addr, int numpages,
+ 				       pgprot_t mask, int array)
+ {
+@@ -1662,11 +1679,28 @@ int set_memory_rw(unsigned long addr, in
+ }
+ EXPORT_SYMBOL_GPL(set_memory_rw);
+ 
++int set_memory_p(unsigned long addr, int numpages)
++{
++	return change_page_attr_set(&addr, numpages, __pgprot(_PAGE_PRESENT), 0);
++}
++
+ int set_memory_np(unsigned long addr, int numpages)
+ {
+ 	return change_page_attr_clear(&addr, numpages, __pgprot(_PAGE_PRESENT), 0);
+ }
+ 
++#ifdef CONFIG_KRX
++/* Similar to set_memory_np, but without checking for aliases */
++int _set_memory_np(unsigned long addr, int numpages)
++{
++	return ___change_page_attr_set_clr(&addr,
++					numpages,
++					__pgprot(0),
++					__pgprot(_PAGE_PRESENT),
++					0, 0, NULL, 0);
++}
++#endif
++
+ int set_memory_4k(unsigned long addr, int numpages)
+ {
+ 	return change_page_attr_set_clr(&addr, numpages, __pgprot(0),
+diff -uprN linux-3.19/arch/x86/mm/physaddr.c linux-3.19-krx/arch/x86/mm/physaddr.c
+--- linux-3.19/arch/x86/mm/physaddr.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/mm/physaddr.c	2017-07-23 16:03:47.368993443 -0400
+@@ -69,7 +69,13 @@ EXPORT_SYMBOL(__virt_addr_valid);
+ #ifdef CONFIG_DEBUG_VIRTUAL
+ unsigned long __phys_addr(unsigned long x)
+ {
+-	unsigned long phys_addr = x - PAGE_OFFSET;
++#ifdef CONFIG_KRX
++	unsigned long phys_addr = (x < __START_KERNEL_map)	?
++					(x - PAGE_OFFSET)	: 
++					(x - __START_KERNEL_map);
++#else
++ 	unsigned long phys_addr = x - PAGE_OFFSET;
++#endif
+ 	/* VMALLOC_* aren't constants  */
+ 	VIRTUAL_BUG_ON(x < PAGE_OFFSET);
+ 	VIRTUAL_BUG_ON(__vmalloc_start_set && is_vmalloc_addr((void *) x));
+diff -uprN linux-3.19/arch/x86/tools/relocs.c linux-3.19-krx/arch/x86/tools/relocs.c
+--- linux-3.19/arch/x86/tools/relocs.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/arch/x86/tools/relocs.c	2017-07-23 16:03:47.444993446 -0400
+@@ -74,6 +74,9 @@ static const char * const sym_regex_kern
+ 	"__end_rodata_hpage_align|"
+ #endif
+ 	"__vvar_page|"
++	"__krx_(s|e)data|"
++	"_start_code_pointers|"
++	"_end_code_pointers|"
+ 	"_end)$"
+ };
+ 
+diff -uprN linux-3.19/drivers/acpi/processor_perflib.c linux-3.19-krx/drivers/acpi/processor_perflib.c
+--- linux-3.19/drivers/acpi/processor_perflib.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/drivers/acpi/processor_perflib.c	2017-07-23 16:03:37.768993080 -0400
+@@ -719,7 +719,7 @@ int acpi_processor_preregister_performan
+ 
+ 			match_pr->performance->shared_type = 
+ 					pr->performance->shared_type;
+-			cpumask_copy(match_pr->performance->shared_cpu_map,
++			krx_cpumask_copy(match_pr->performance->shared_cpu_map,
+ 				     pr->performance->shared_cpu_map);
+ 		}
+ 	}
+diff -uprN linux-3.19/include/asm-generic/fixmap.h linux-3.19-krx/include/asm-generic/fixmap.h
+--- linux-3.19/include/asm-generic/fixmap.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/asm-generic/fixmap.h	2017-07-23 16:04:08.012994229 -0400
+@@ -16,9 +16,19 @@
+ #define __ASM_GENERIC_FIXMAP_H
+ 
+ #include <linux/bug.h>
++#include <asm/vsyscall.h>
+ 
++#if	defined(CONFIG_KRX)			&& 	\
++	defined(CONFIG_X86_VSYSCALL_EMULATION)	&&	\
++	!defined(BUILD_VDSO32)
++#define __fix_to_virt(x)	(((x) != VSYSCALL_PAGE) ?		\
++		(FIXADDR_TOP - ((x) << PAGE_SHIFT)) : VSYSCALL_ADDR)
++#define __virt_to_fix(x)	(((x)&PAGE_MASK) != VSYSCALL_ADDR) ?	\
++		((FIXADDR_TOP - ((x)&PAGE_MASK)) >> PAGE_SHIFT) : VSYSCALL_PAGE
++#else
+ #define __fix_to_virt(x)	(FIXADDR_TOP - ((x) << PAGE_SHIFT))
+ #define __virt_to_fix(x)	((FIXADDR_TOP - ((x)&PAGE_MASK)) >> PAGE_SHIFT)
++#endif
+ 
+ #ifndef __ASSEMBLY__
+ /*
+@@ -34,7 +44,10 @@ static __always_inline unsigned long fix
+ 
+ static inline unsigned long virt_to_fix(const unsigned long vaddr)
+ {
+-	BUG_ON(vaddr >= FIXADDR_TOP || vaddr < FIXADDR_START);
++	BUG_ON(
++		((vaddr & PAGE_MASK) != VSYSCALL_ADDR) &&	\
++		(vaddr >= FIXADDR_TOP || vaddr < FIXADDR_START)
++	      );
+ 	return __virt_to_fix(vaddr);
+ }
+ 
+diff -uprN linux-3.19/include/asm-generic/sections.h linux-3.19-krx/include/asm-generic/sections.h
+--- linux-3.19/include/asm-generic/sections.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/asm-generic/sections.h	2017-07-23 16:04:08.008994228 -0400
+@@ -35,6 +35,10 @@ extern char __per_cpu_load[], __per_cpu_
+ extern char __kprobes_text_start[], __kprobes_text_end[];
+ extern char __entry_text_start[], __entry_text_end[];
+ extern char __start_rodata[], __end_rodata[];
++#ifdef CONFIG_KRX
++extern char __krx_sdata[], __krx_edata[];
++extern char _start_code_pointers[], _end_code_pointers[];
++#endif
+ 
+ /* Start and end of .ctors section - used for constructor calls. */
+ extern char __ctors_start[], __ctors_end[];
+diff -uprN linux-3.19/include/asm-generic/vmlinux.lds.h linux-3.19-krx/include/asm-generic/vmlinux.lds.h
+--- linux-3.19/include/asm-generic/vmlinux.lds.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/asm-generic/vmlinux.lds.h	2017-07-23 16:51:52.909102528 -0400
+@@ -175,6 +175,25 @@
+ 	*(.dtb.init.rodata)						\
+ 	VMLINUX_SYMBOL(__dtb_end) = .;
+ 
++#ifdef	CONFIG_KRX
++/* .data section */
++#define DATA_DATA							\
++	*(.data)							\
++	*(.ref.data)							\
++	*(.data..shared_aligned) /* percpu related */			\
++	MEM_KEEP(init.data)						\
++	MEM_KEEP(exit.data)						\
++	*(.data.unlikely)						\
++	STRUCT_ALIGN();							\
++	/* implement dynamic printk debug */				\
++	VMLINUX_SYMBOL(__start___verbose) = .;                          \
++	*(__verbose)                                                    \
++	VMLINUX_SYMBOL(__stop___verbose) = .;				\
++	LIKELY_PROFILE()		       				\
++	BRANCH_PROFILE()						\
++	TRACE_PRINTKS()							\
++	TRACEPOINT_STR()
++#else
+ /* .data section */
+ #define DATA_DATA							\
+ 	*(.data)							\
+@@ -198,6 +217,7 @@
+ 	BRANCH_PROFILE()						\
+ 	TRACE_PRINTKS()							\
+ 	TRACEPOINT_STR()
++#endif
+ 
+ /*
+  * Data section helpers
+@@ -240,7 +260,7 @@
+ 		*(__tracepoints_ptrs)	/* Tracepoints: pointer array */\
+ 		VMLINUX_SYMBOL(__stop___tracepoints_ptrs) = .;		\
+ 		*(__tracepoints_strings)/* Tracepoints: strings */	\
+-	}								\
++	} :rodata							\
+ 									\
+ 	.rodata1          : AT(ADDR(.rodata1) - LOAD_OFFSET) {		\
+ 		*(.rodata1)						\
+diff -uprN linux-3.19/include/linux/cpumask.h linux-3.19-krx/include/linux/cpumask.h
+--- linux-3.19/include/linux/cpumask.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/linux/cpumask.h	2017-07-23 16:04:07.932994228 -0400
+@@ -506,6 +506,12 @@ static inline void cpumask_copy(struct c
+ 	bitmap_copy(cpumask_bits(dstp), cpumask_bits(srcp), nr_cpumask_bits);
+ }
+ 
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_64)
++extern void krx_cpumask_copy(struct cpumask *dstp, const struct cpumask *srcp);
++#else
++#define krx_cpumask_copy(dstp, srcp) cpumask_copy((dstp), (srcp))
++#endif
++
+ /**
+  * cpumask_any - pick a "random" cpu from *srcp
+  * @srcp: the input cpumask
+diff -uprN linux-3.19/include/linux/ftrace_event.h linux-3.19-krx/include/linux/ftrace_event.h
+--- linux-3.19/include/linux/ftrace_event.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/linux/ftrace_event.h	2017-07-23 16:22:28.737026411 -0400
+@@ -305,6 +305,18 @@ struct ftrace_event_call {
+ #endif
+ };
+ 
++#ifdef	CONFIG_KRX
++const char *krx_get_tp_name(struct tracepoint *tp);
++
++static inline const char *
++ftrace_event_name(struct ftrace_event_call *call)
++{
++	if (call->flags & TRACE_EVENT_FL_TRACEPOINT)
++		return call->tp ? krx_get_tp_name(call->tp) : NULL;
++	else
++		return call->name;
++}
++#else
+ static inline const char *
+ ftrace_event_name(struct ftrace_event_call *call)
+ {
+@@ -313,6 +325,7 @@ ftrace_event_name(struct ftrace_event_ca
+ 	else
+ 		return call->name;
+ }
++#endif
+ 
+ struct trace_array;
+ struct ftrace_subsystem_dir;
+diff -uprN linux-3.19/include/linux/jump_label.h linux-3.19-krx/include/linux/jump_label.h
+--- linux-3.19/include/linux/jump_label.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/linux/jump_label.h	2017-07-23 16:04:07.944994227 -0400
+@@ -83,10 +83,14 @@ struct module;
+ 
+ #include <linux/atomic.h>
+ 
++#ifdef	CONFIG_KRX
++int static_key_count(struct static_key *key);
++#else
+ static inline int static_key_count(struct static_key *key)
+ {
+ 	return atomic_read(&key->enabled);
+ }
++#endif
+ 
+ #ifdef HAVE_JUMP_LABEL
+ 
+@@ -94,16 +98,22 @@ static inline int static_key_count(struc
+ #define JUMP_LABEL_TYPE_TRUE_BRANCH	1UL
+ #define JUMP_LABEL_TYPE_MASK		1UL
+ 
++#ifdef	CONFIG_KRX
++struct jump_entry *krx_get_key_entries(struct static_key *key);
++#else
++#define	krx_get_key_entries(key) key->entries
++#endif
++
+ static
+ inline struct jump_entry *jump_label_get_entries(struct static_key *key)
+ {
+-	return (struct jump_entry *)((unsigned long)key->entries
++	return (struct jump_entry *)((unsigned long)krx_get_key_entries(key)
+ 						& ~JUMP_LABEL_TYPE_MASK);
+ }
+ 
+ static inline bool jump_label_get_branch_default(struct static_key *key)
+ {
+-	if (((unsigned long)key->entries & JUMP_LABEL_TYPE_MASK) ==
++	if (((unsigned long)krx_get_key_entries(key) & JUMP_LABEL_TYPE_MASK) ==
+ 	    JUMP_LABEL_TYPE_TRUE_BRANCH)
+ 		return true;
+ 	return false;
+diff -uprN linux-3.19/include/linux/module.h linux-3.19-krx/include/linux/module.h
+--- linux-3.19/include/linux/module.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/linux/module.h	2017-07-23 16:04:07.464994225 -0400
+@@ -272,16 +272,36 @@ struct module {
+ 	/* If this is non-NULL, vfree after init() returns */
+ 	void *module_init;
+ 
++#ifdef CONFIG_KRX
++	/* Here is the actual code, vfree'd on unload. */
++	void *module_text_core;
++
++	/* Here is the actual data, vfree'd on unload. */
++	void *module_data_core;
++
++	/* Here is the actual jump table, vfree'd on unload */
++	void *module_ro_code_pointers_core;
++
++	/* Here is the actual jump table, vfree'd on unload */
++	void *module_code_pointers_core;
++#else
+ 	/* Here is the actual code + data, vfree'd on unload. */
+ 	void *module_core;
++#endif
+ 
+ 	/* Here are the sizes of the init and core sections */
++#ifdef CONFIG_KRX
++	unsigned int init_size, core_data_size;
++	unsigned int core_ro_code_pointers_size, core_code_pointers_size;
++#else
+ 	unsigned int init_size, core_size;
++#endif
+ 
+ 	/* The size of the executable code in each section.  */
+ 	unsigned int init_text_size, core_text_size;
+ 
+-	/* Size of RO sections of the module (text+rodata) */
++	/* Size of RO sections of the module
++	 * (text+rodata or rodata in KRX) */
+ 	unsigned int init_ro_size, core_ro_size;
+ 
+ 	/* Arch-specific module values */
+@@ -385,8 +405,17 @@ bool is_module_text_address(unsigned lon
+ static inline bool within_module_core(unsigned long addr,
+ 				      const struct module *mod)
+ {
++#ifdef CONFIG_KRX
++	return (((unsigned long)mod->module_text_core <= addr &&
++			addr < (unsigned long)mod->module_text_core +
++			mod->core_text_size))			||
++		(((unsigned long)mod->module_data_core <= addr &&
++			addr < (unsigned long)mod->module_data_core +
++			mod->core_data_size));
++#else
+ 	return (unsigned long)mod->module_core <= addr &&
+ 	       addr < (unsigned long)mod->module_core + mod->core_size;
++#endif
+ }
+ 
+ static inline bool within_module_init(unsigned long addr,
+diff -uprN linux-3.19/include/linux/moduleloader.h linux-3.19-krx/include/linux/moduleloader.h
+--- linux-3.19/include/linux/moduleloader.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/linux/moduleloader.h	2017-07-23 16:04:07.736994218 -0400
+@@ -21,11 +21,18 @@ int module_frob_arch_sections(Elf_Ehdr *
+ /* Additional bytes needed by arch in front of individual sections */
+ unsigned int arch_mod_section_prepend(struct module *mod, unsigned int section);
+ 
++#ifdef CONFIG_KRX
++/* Allocator used for allocating module data sections.
++   Returns NULL on failure. */
++void *module_data_alloc(unsigned long size);
++void *module_alloc_nx(unsigned long size);
++#endif
++
+ /* Allocator used for allocating struct module, core sections and init
+    sections.  Returns NULL on failure. */
+ void *module_alloc(unsigned long size);
+ 
+-/* Free memory returned from module_alloc. */
++/* Free memory returned from module_text/data_alloc. */
+ void module_memfree(void *module_region);
+ 
+ /*
+diff -uprN linux-3.19/include/linux/string.h linux-3.19-krx/include/linux/string.h
+--- linux-3.19/include/linux/string.h	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/include/linux/string.h	2017-07-23 17:31:09.869195054 -0400
+@@ -158,4 +158,12 @@ static inline const char *kbasename(cons
+ 	return tail ? tail + 1 : path;
+ }
+ 
++#ifdef CONFIG_KRX
++extern void *krx_memcpy(void *dst, const void *src, size_t len);
++extern int krx_memcmp(const void *cs, const void *ct, size_t count);
++#else
++#define krx_memcpy(dst, src, len) memcpy((dst), (src), (len))
++#define krx_memcmp(cs, ct, count) memcmp((cs), (ct), (count))
++#endif
++
+ #endif /* _LINUX_STRING_H_ */
+diff -uprN linux-3.19/init/main.c linux-3.19-krx/init/main.c
+--- linux-3.19/init/main.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/init/main.c	2017-07-23 16:03:18.044992328 -0400
+@@ -7,6 +7,12 @@
+  *  Added initrd & change_root: Werner Almesberger & Hans Lermen, Feb '96
+  *  Moan early if gcc is old, avoiding bogus kernels - Paul Gortmaker, May '96
+  *  Simplified starting of init:  Michael A. Griffith <grif@acm.org>
++ *
++ *  Support for kR^X was added by:
++ *  	Vasileios P. Kemerlis	<vpk@cs.brown.edu>
++ *  	Marios Pomonis		<mpomonis@cs.columbia.edu>
++ *  Copyright (C) 2015, Brown University, Providence, RI, USA.
++ *  Copyright (C) 2015, Columbia University, New York, NY, USA.
+  */
+ 
+ #define DEBUG		/* Enable initcall_debug */
+@@ -85,6 +91,7 @@
+ #include <asm/bugs.h>
+ #include <asm/setup.h>
+ #include <asm/sections.h>
++#include <asm/tlbflush.h>
+ #include <asm/cacheflush.h>
+ 
+ #ifdef CONFIG_X86_LOCAL_APIC
+@@ -934,15 +941,54 @@ static int try_to_run_init_process(const
+ 
+ static noinline void __init kernel_init_freeable(void);
+ 
++#ifdef CONFIG_KRX
++#ifdef CONFIG_KRX_MPX
++unsigned long cpu_has_mpx = 0;
++#endif
++void __section(.krx_phantom)
++krx_phantom(void)
++{
++	panic("%s.", __func__);
++}
++#endif
++
+ static int __ref kernel_init(void *unused)
+ {
+ 	int ret;
++#ifdef CONFIG_KRX
++	unsigned long tpstart = PFN_DOWN(
++			(unsigned long)_text - __START_KERNEL_map + PAGE_OFFSET
++			) << PAGE_SHIFT;
++	unsigned long tpend = PFN_ALIGN(
++			(unsigned long)_end - __START_KERNEL_map + PAGE_OFFSET
++			);
++#endif
+ 
+ 	kernel_init_freeable();
+ 	/* need to finish all async __init code before freeing the memory */
+ 	async_synchronize_full();
+ 	free_initmem();
+ 	mark_rodata_ro();
++#ifdef CONFIG_KRX
++#ifdef CONFIG_KRX_MPX
++	if (!cpu_has_mpx)
++		pr_warn("kR^X: The CPU does not support "	\
++			"Memory Protection Extensions (MPX)\n");
++#endif
++#ifdef CONFIG_KRX_VERBOSE
++	pr_info("kR^X active:\n"					\
++		"  Execute-only (X) region: 0x%lx - 0x%lx\n",
++		PFN_DOWN((unsigned long)_text) << PAGE_SHIFT, KERNEL_END);
++	pr_info("kR^X: Read protecting the kernel .text in physmap: "	\
++			"(0x%lx - 0x%lx)\n", tpstart, tpend);
++#endif
++	_set_memory_np(tpstart, PFN_DOWN(tpend) - PFN_DOWN(tpstart));
++#ifdef CONFIG_X86_32
++	_set_memory_np(PFN_ALIGN((unsigned long)_end),
++		((PFN_ALIGN(max_init_mapped) - PFN_ALIGN((unsigned long)_end))
++		 	>> PAGE_SHIFT));
++#endif
++#endif
+ 	system_state = SYSTEM_RUNNING;
+ 	numa_default_policy();
+ 
+diff -uprN linux-3.19/kernel/bpf/core.c linux-3.19-krx/kernel/bpf/core.c
+--- linux-3.19/kernel/bpf/core.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/bpf/core.c	2017-07-23 16:03:42.840993272 -0400
+@@ -187,6 +187,9 @@ static unsigned int __bpf_prog_run(void
+ {
+ 	u64 stack[MAX_BPF_STACK / sizeof(u64)];
+ 	u64 regs[MAX_BPF_REG], tmp;
++#ifdef CONFIG_KRX
++	__section(bpf_jump_table)
++#endif
+ 	static const void *jumptable[256] = {
+ 		[0 ... 255] = &&default_label,
+ 		/* Now overwrite non-defaults ... */
+diff -uprN linux-3.19/kernel/debug/kdb/kdb_main.c linux-3.19-krx/kernel/debug/kdb/kdb_main.c
+--- linux-3.19/kernel/debug/kdb/kdb_main.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/debug/kdb/kdb_main.c	2017-07-23 16:03:41.708993229 -0400
+@@ -2020,8 +2020,14 @@ static int kdb_lsmod(int argc, const cha
+ 		if (mod->state == MODULE_STATE_UNFORMED)
+ 			continue;
+ 
++#ifdef CONFIG_KRX
++		kdb_printf("%-20s%8u  0x%p ", mod->name,
++			   mod->core_text_size + mod->core_data_size,
++			   (void *)mod);
++#else
+ 		kdb_printf("%-20s%8u  0x%p ", mod->name,
+ 			   mod->core_size, (void *)mod);
++#endif
+ #ifdef CONFIG_MODULE_UNLOAD
+ 		kdb_printf("%4d ", module_refcount(mod));
+ #endif
+@@ -2031,7 +2037,13 @@ static int kdb_lsmod(int argc, const cha
+ 			kdb_printf(" (Loading)");
+ 		else
+ 			kdb_printf(" (Live)");
++#ifdef CONFIG_KRX
++		kdb_printf(" 0x%p 0x%p",
++				mod->module_text_core,
++				mod->module_data_core);
++#else
+ 		kdb_printf(" 0x%p", mod->module_core);
++#endif
+ 
+ #ifdef CONFIG_MODULE_UNLOAD
+ 		{
+diff -uprN linux-3.19/kernel/gcov/base.c linux-3.19-krx/kernel/gcov/base.c
+--- linux-3.19/kernel/gcov/base.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/gcov/base.c	2017-07-23 16:03:41.580993223 -0400
+@@ -133,7 +133,15 @@ static int gcov_module_notifier(struct n
+ 
+ 	/* Remove entries located in module from linked list. */
+ 	while ((info = gcov_info_next(info))) {
+-		if (within(info, mod->module_core, mod->core_size)) {
++		if (
++#ifdef CONFIG_KRX
++		within(info, mod->module_text_core, mod->core_text_size) ||
++		within(info, mod->module_data_core, mod->core_data_size)
++#else
++		within(info, mod->module_core, mod->core_size)
++#endif
++		
++		) {
+ 			gcov_info_unlink(prev, info);
+ 			if (gcov_events_enabled)
+ 				gcov_event(GCOV_REMOVE, info);
+diff -uprN linux-3.19/kernel/jump_label.c linux-3.19-krx/kernel/jump_label.c
+--- linux-3.19/kernel/jump_label.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/jump_label.c	2017-07-23 16:03:42.408993255 -0400
+@@ -222,6 +222,12 @@ void __init jump_label_init(void)
+ 
+ #ifdef CONFIG_MODULES
+ 
++noinline struct static_key_mod *krx_get_key_next(struct static_key *key)
++{
++	return key->next;
++}
++
++
+ struct static_key_mod {
+ 	struct static_key_mod *next;
+ 	struct jump_entry *entries;
+@@ -287,6 +293,7 @@ static int jump_label_add_module(struct
+ 	struct jump_entry *iter;
+ 	struct static_key *key = NULL;
+ 	struct static_key_mod *jlm;
++	struct jump_entry *entries;
+ 
+ 	/* if the module doesn't have jump label entries, just return */
+ 	if (iter_start == iter_stop)
+@@ -306,7 +313,8 @@ static int jump_label_add_module(struct
+ 			/*
+ 			 * Set key->entries to iter, but preserve JUMP_LABEL_TRUE_BRANCH.
+ 			 */
+-			*((unsigned long *)&key->entries) += (unsigned long)iter;
++			entries = krx_get_key_entries(key);
++			*((unsigned long *)&entries) += (unsigned long)iter;
+ 			key->next = NULL;
+ 			continue;
+ 		}
+@@ -315,7 +323,7 @@ static int jump_label_add_module(struct
+ 			return -ENOMEM;
+ 		jlm->mod = mod;
+ 		jlm->entries = iter;
+-		jlm->next = key->next;
++		jlm->next = krx_get_key_next(key);
+ 		key->next = jlm;
+ 
+ 		if (jump_label_type(key) == JUMP_LABEL_ENABLE)
+diff -uprN linux-3.19/kernel/locking/lockdep.c linux-3.19-krx/kernel/locking/lockdep.c
+--- linux-3.19/kernel/locking/lockdep.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/locking/lockdep.c	2017-07-23 16:03:42.316993252 -0400
+@@ -595,6 +595,10 @@ static int very_verbose(struct lock_clas
+ #ifdef __KERNEL__
+ static int static_obj(void *obj)
+ {
++#ifdef CONFIG_KRX
++	unsigned long	dstart= (unsigned long) &__krx_sdata,
++			dend  = (unsigned long) &__krx_edata;
++#endif
+ 	unsigned long start = (unsigned long) &_stext,
+ 		      end   = (unsigned long) &_end,
+ 		      addr  = (unsigned long) obj;
+@@ -602,7 +606,14 @@ static int static_obj(void *obj)
+ 	/*
+ 	 * static variable?
+ 	 */
+-	if ((addr >= start) && (addr < end))
++	if (
++#ifdef CONFIG_KRX
++	((addr >= start) && (addr < end)) ||
++	((addr >= dstart) && (addr < dend))
++#else
++	(addr >= start) && (addr < end)
++#endif
++	)
+ 		return 1;
+ 
+ 	if (arch_is_kernel_data(addr))
+diff -uprN linux-3.19/kernel/Makefile linux-3.19-krx/kernel/Makefile
+--- linux-3.19/kernel/Makefile	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/Makefile	2017-07-23 16:03:41.568993224 -0400
+@@ -9,7 +9,7 @@ obj-y     = fork.o exec_domain.o panic.o
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o groups.o smpboot.o
++	    async.o range.o groups.o smpboot.o static_key.o
+ 
+ ifdef CONFIG_FUNCTION_TRACER
+ # Do not trace debug files and internal ftrace files
+diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
+--- linux-3.19/kernel/module.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/module.c	2017-07-23 17:00:04.017120832 -0400
+@@ -62,6 +62,8 @@
+ #include <uapi/linux/module.h>
+ #include "module-internal.h"
+ 
++#include <asm/desc.h>
++
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/module.h>
+ 
+@@ -155,7 +157,12 @@ static BLOCKING_NOTIFIER_HEAD(module_not
+ 
+ /* Bounds of module allocation, for speeding __module_address.
+  * Protected by module_mutex. */
++#ifdef CONFIG_KRX
++static unsigned long module_text_addr_min = -1UL, module_text_addr_max = 0;
++static unsigned long module_data_addr_min = -1UL, module_data_addr_max = 0;
++#else
+ static unsigned long module_addr_min = -1UL, module_addr_max = 0;
++#endif
+ 
+ int register_module_notifier(struct notifier_block *nb)
+ {
+@@ -1053,7 +1060,12 @@ struct module_attribute module_uevent =
+ static ssize_t show_coresize(struct module_attribute *mattr,
+ 			     struct module_kobject *mk, char *buffer)
+ {
++#ifdef CONFIG_KRX
++	return sprintf(buffer, "%u\n",
++			mk->mod->core_text_size + mk->mod->core_data_size);
++#else
+ 	return sprintf(buffer, "%u\n", mk->mod->core_size);
++#endif
+ }
+ 
+ static struct module_attribute modinfo_coresize =
+@@ -1703,6 +1715,112 @@ void set_page_attributes(void *start, vo
+ 		set(begin_pfn << PAGE_SHIFT, end_pfn - begin_pfn);
+ }
+ 
++#ifdef CONFIG_KRX
++/* 
++ * (Un)map synonym pages of text that exist inside
++ * the direct-mapped memory region (physmap).
++ */
++
++typedef enum {
++	KRX_CMD_KUNMAP = 1,	/* unmap	*/
++	KRX_CMD_KMAP		/* map		*/
++} krx_cmd_t;
++
++static void handle_text_synonyms(krx_cmd_t act,
++				const char *mname,
++				void *text_base,
++				unsigned long text_size)
++{
++	void		*paddr	= NULL;
++	struct page	*pg	= NULL;
++#if defined(CONFIG_KRX_VERBOSE) && defined(CONFIG_X86_32)
++	bool		verbose	= true;
++#endif
++
++#if defined(CONFIG_KRX_VERBOSE) && defined(CONFIG_X86_64)
++	if ((act == KRX_CMD_KUNMAP) && (text_size > 0))
++		pr_info("kR^X: Read protecting the .text segment of module %s in physmap:\n", mname);
++#endif
++
++	while (text_size > 0) {
++		pg = vmalloc_to_page(text_base);
++#ifdef CONFIG_X86_32
++		if (PageHighMem(pg))
++			goto next;
++#ifdef CONFIG_KRX_VERBOSE
++		if ((act == KRX_CMD_KUNMAP) && verbose) {
++			pr_info("kR^X: Read protecting the .text segment of module %s in physmap:\n", mname);
++			verbose = false;
++		}
++#endif
++#endif
++		paddr = pfn_to_kaddr(page_to_pfn(pg));
++
++		/* TODO: remove (sanity check) */
++		BUG_ON(!paddr);
++
++		switch (act) {
++			/* unmap */
++			case KRX_CMD_KUNMAP:
++				set_page_attributes(paddr,
++						paddr + PAGE_SIZE,
++						set_memory_np);
++#ifdef CONFIG_KRX_VERBOSE
++				pr_info("  [0x%lx - 0x%lx]\n",
++					PFN_DOWN((unsigned long)paddr) << PAGE_SHIFT,
++					(PFN_DOWN((unsigned long)paddr) << PAGE_SHIFT) + PAGE_SIZE);
++#endif
++
++				break;
++			/* map */
++			case KRX_CMD_KMAP:
++				set_page_attributes(paddr,
++						paddr + PAGE_SIZE,
++						set_memory_p);
++
++				/* zap page contents */
++				memset(paddr, 0, PAGE_SIZE);
++				
++				break;
++		}
++
++#ifdef CONFIG_X86_32
++next:
++#endif
++		text_base += PAGE_SIZE;
++		text_size -= PAGE_SIZE;
++	}
++}
++
++static void set_core_section_ro(void *text_base,
++			void *data_base,
++			void *ro_code_pointers_base,
++			unsigned long text_size,
++			unsigned long ro_size,
++			unsigned long data_size,
++			unsigned long ro_code_pointers_size)
++{
++	/* Set RO for module text */
++	if (text_size > 0)
++		set_page_attributes(text_base,
++					text_base + text_size,
++					set_memory_ro);
++	
++	/* Set RO for module ro-data */
++	if (ro_size > 0)
++		set_page_attributes(data_base,
++					data_base + ro_size,
++					set_memory_ro);
++
++	if (ro_code_pointers_size > 0) {
++		set_page_attributes(ro_code_pointers_base,
++					ro_code_pointers_base + ro_code_pointers_size,
++					set_memory_ro);
++	}
++
++}
++#endif
++
+ static void set_section_ro_nx(void *base,
+ 			unsigned long text_size,
+ 			unsigned long ro_size,
+@@ -1735,12 +1853,26 @@ static void set_section_ro_nx(void *base
+ 
+ static void unset_module_core_ro_nx(struct module *mod)
+ {
++#ifdef CONFIG_KRX
++	set_page_attributes(mod->module_data_core,
++		mod->module_data_core + mod->core_ro_size,
++		set_memory_rw);
++	set_page_attributes(mod->module_text_core,
++		mod->module_text_core + mod->core_text_size,
++		set_memory_rw);
++	if (mod->core_ro_code_pointers_size)
++		set_page_attributes(mod->module_ro_code_pointers_core,
++				mod->module_ro_code_pointers_core +
++					mod->core_ro_code_pointers_size,
++				set_memory_rw);
++#else
+ 	set_page_attributes(mod->module_core + mod->core_text_size,
+ 		mod->module_core + mod->core_size,
+ 		set_memory_x);
+ 	set_page_attributes(mod->module_core,
+ 		mod->module_core + mod->core_ro_size,
+ 		set_memory_rw);
++#endif
+ }
+ 
+ static void unset_module_init_ro_nx(struct module *mod)
+@@ -1762,10 +1894,17 @@ void set_all_modules_text_rw(void)
+ 	list_for_each_entry_rcu(mod, &modules, list) {
+ 		if (mod->state == MODULE_STATE_UNFORMED)
+ 			continue;
++#ifdef CONFIG_KRX
++		if ((mod->module_text_core) && (mod->core_text_size)) {
++			set_page_attributes(mod->module_text_core,
++				mod->module_text_core + mod->core_text_size,
++						set_memory_rw);
++#else
+ 		if ((mod->module_core) && (mod->core_text_size)) {
+ 			set_page_attributes(mod->module_core,
+ 						mod->module_core + mod->core_text_size,
+ 						set_memory_rw);
++#endif
+ 		}
+ 		if ((mod->module_init) && (mod->init_text_size)) {
+ 			set_page_attributes(mod->module_init,
+@@ -1785,10 +1924,17 @@ void set_all_modules_text_ro(void)
+ 	list_for_each_entry_rcu(mod, &modules, list) {
+ 		if (mod->state == MODULE_STATE_UNFORMED)
+ 			continue;
++#ifdef CONFIG_KRX
++		if ((mod->module_text_core) && (mod->core_text_size)) {
++			set_page_attributes(mod->module_text_core,
++				mod->module_text_core + mod->core_text_size,
++						set_memory_ro);
++#else
+ 		if ((mod->module_core) && (mod->core_text_size)) {
+ 			set_page_attributes(mod->module_core,
+ 						mod->module_core + mod->core_text_size,
+ 						set_memory_ro);
++#endif
+ 		}
+ 		if ((mod->module_init) && (mod->init_text_size)) {
+ 			set_page_attributes(mod->module_init,
+@@ -1799,7 +1945,8 @@ void set_all_modules_text_ro(void)
+ 	mutex_unlock(&module_mutex);
+ }
+ #else
+-static inline void set_section_ro_nx(void *base, unsigned long text_size, unsigned long ro_size, unsigned long total_size) { }
++static inline void set_section_ro_nx(void *base, unsigned long text_size,
++		unsigned long ro_size, unsigned long total_size) { }
+ static void unset_module_core_ro_nx(struct module *mod) { }
+ static void unset_module_init_ro_nx(struct module *mod) { }
+ #endif
+@@ -1860,11 +2007,43 @@ static void free_module(struct module *m
+ 	percpu_modfree(mod);
+ 
+ 	/* Free lock-classes: */
++#ifdef CONFIG_KRX
++	lockdep_free_key_range(mod->module_text_core, mod->core_text_size);
++	lockdep_free_key_range(mod->module_data_core, mod->core_data_size);
++	if (mod->core_code_pointers_size)
++		lockdep_free_key_range(mod->module_code_pointers_core,
++					mod->core_code_pointers_size);
++	if (mod->core_ro_code_pointers_size)
++		lockdep_free_key_range(mod->module_ro_code_pointers_core,
++					mod->core_ro_code_pointers_size);
++#else
+ 	lockdep_free_key_range(mod->module_core, mod->core_size);
++#endif
+ 
+ 	/* Finally, free the core (containing the module structure) */
+ 	unset_module_core_ro_nx(mod);
++#ifdef CONFIG_KRX
++	handle_text_synonyms(KRX_CMD_KMAP,
++			mod->name,
++			mod->module_text_core,
++			mod->core_text_size);
++	handle_text_synonyms(KRX_CMD_KMAP,
++			mod->name,
++			mod->module_ro_code_pointers_core,
++			mod->core_ro_code_pointers_size);
++	handle_text_synonyms(KRX_CMD_KMAP,
++			mod->name,
++			mod->module_code_pointers_core,
++			mod->core_code_pointers_size);
++	module_memfree(mod->module_text_core);
++	module_memfree(mod->module_data_core);
++	if (mod->core_ro_code_pointers_size)
++		module_memfree(mod->module_ro_code_pointers_core);
++	if (mod->core_code_pointers_size)
++		module_memfree(mod->module_code_pointers_core);
++#else
+ 	module_memfree(mod->module_core);
++#endif
+ 
+ #ifdef CONFIG_MPU
+ 	update_protections(current->mm);
+@@ -2024,6 +2203,22 @@ unsigned int __weak arch_mod_section_pre
+ 	return 0;
+ }
+ 
++static unsigned long is_ro_code_pointer(const char *sname)
++{
++	return ((strstarts(sname, ".jmp_tbls")		&&
++		strlen(sname) == strlen(".jmp_tbls"))		||
++			(strstarts(sname, "__ex_table")	&& 
++			strlen(sname) == strlen("__ex_table")));
++}
++
++static unsigned long is_code_pointer(const char *sname)
++{
++	return ((strstarts(sname, "__jump_table") 		&&
++		strlen(sname) == strlen("__jump_table"))		||
++			(strstarts(sname, "__tracepoints")	&&
++			strlen(sname) == strlen("__tracepoints")));
++}
++
+ /* Update size with this section: return offset. */
+ static long get_offset(struct module *mod, unsigned int *size,
+ 		       Elf_Shdr *sechdr, unsigned int section)
+@@ -2052,7 +2247,10 @@ static void layout_sections(struct modul
+ 		{ ARCH_SHF_SMALL | SHF_ALLOC, 0 }
+ 	};
+ 	unsigned int m, i;
+-
++#ifdef	CONFIG_KRX
++	mod->core_ro_code_pointers_size = 0;
++	mod->core_code_pointers_size = 0;
++#endif
+ 	for (i = 0; i < info->hdr->e_shnum; i++)
+ 		info->sechdrs[i].sh_entsize = ~0UL;
+ 
+@@ -2067,10 +2265,40 @@ static void layout_sections(struct modul
+ 			    || s->sh_entsize != ~0UL
+ 			    || strstarts(sname, ".init"))
+ 				continue;
++#ifdef CONFIG_KRX
++			if (!m)
++				s->sh_entsize = get_offset(mod,
++						&mod->core_text_size, s, i);
++			else if (!is_ro_code_pointer(sname) && !is_code_pointer(sname))
++				s->sh_entsize = get_offset(mod,
++						&mod->core_data_size, s, i);
++			else if (is_ro_code_pointer(sname)) {
++				s->sh_entsize = get_offset(mod,
++						&mod->core_ro_code_pointers_size, s, i);
++			} else {
++				s->sh_entsize = get_offset(mod,
++						&mod->core_code_pointers_size, s, i);
++			}
++#else
+ 			s->sh_entsize = get_offset(mod, &mod->core_size, s, i);
++#endif
+ 			pr_debug("\t%s\n", sname);
+ 		}
+ 		switch (m) {
++#ifdef CONFIG_KRX
++		case 0: /* text */
++			mod->core_text_size = debug_align(mod->core_text_size);
++			break;
++		case 1: /* ro-data */
++			mod->core_data_size = debug_align(mod->core_data_size);
++			mod->core_ro_size = mod->core_data_size;
++			mod->core_ro_code_pointers_size = debug_align(mod->core_ro_code_pointers_size);
++			break;
++		case 2: /* data */
++			mod->core_data_size = debug_align(mod->core_data_size);
++			mod->core_code_pointers_size = debug_align(mod->core_code_pointers_size);
++			break;
++#else
+ 		case 0: /* executable */
+ 			mod->core_size = debug_align(mod->core_size);
+ 			mod->core_text_size = mod->core_size;
+@@ -2082,6 +2310,7 @@ static void layout_sections(struct modul
+ 		case 3: /* whole core */
+ 			mod->core_size = debug_align(mod->core_size);
+ 			break;
++#endif
+ 		}
+ 	}
+ 
+@@ -2302,9 +2531,16 @@ static void layout_symtab(struct module
+ 	}
+ 
+ 	/* Append room for core symbols at end of core part. */
++#ifdef CONFIG_KRX
++	info->symoffs = ALIGN(mod->core_data_size, symsect->sh_addralign ?: 1);
++	info->stroffs = mod->core_data_size =
++		info->symoffs + ndst * sizeof(Elf_Sym);
++	mod->core_data_size += strtab_size;
++#else
+ 	info->symoffs = ALIGN(mod->core_size, symsect->sh_addralign ?: 1);
+ 	info->stroffs = mod->core_size = info->symoffs + ndst * sizeof(Elf_Sym);
+ 	mod->core_size += strtab_size;
++#endif
+ 
+ 	/* Put string table section at end of init part of module. */
+ 	strsect->sh_flags |= SHF_ALLOC;
+@@ -2330,8 +2566,13 @@ static void add_kallsyms(struct module *
+ 	for (i = 0; i < mod->num_symtab; i++)
+ 		mod->symtab[i].st_info = elf_type(&mod->symtab[i], info);
+ 
++#ifdef CONFIG_KRX
++	mod->core_symtab = dst = mod->module_data_core + info->symoffs;
++	mod->core_strtab = s = mod->module_data_core + info->stroffs;
++#else
+ 	mod->core_symtab = dst = mod->module_core + info->symoffs;
+ 	mod->core_strtab = s = mod->module_core + info->stroffs;
++#endif
+ 	src = mod->symtab;
+ 	for (ndst = i = 0; i < mod->num_symtab; i++) {
+ 		if (i == 0 ||
+@@ -2376,6 +2617,41 @@ void * __weak module_alloc(unsigned long
+ 	return vmalloc_exec(size);
+ }
+ 
++#ifdef CONFIG_KRX
++static void *module_data_alloc_update_bounds(unsigned long size)
++{
++	void *ret = module_data_alloc(size);
++
++	if (ret) {
++		mutex_lock(&module_mutex);
++		/* Update module bounds. */
++		if ((unsigned long)ret < module_data_addr_min)
++			module_data_addr_min = (unsigned long)ret;
++		if ((unsigned long)ret + size > module_data_addr_max)
++			module_data_addr_max = (unsigned long)ret + size;
++		mutex_unlock(&module_mutex);
++	}
++	return ret;
++}
++
++static void *module_alloc_update_bounds_nx(unsigned long size)
++{
++	void *ret = module_alloc_nx(size);
++
++	if (ret) {
++		mutex_lock(&module_mutex);
++		/* Update module bounds. */
++		if ((unsigned long)ret < module_text_addr_min)
++			module_text_addr_min = (unsigned long)ret;
++		if ((unsigned long)ret + size > module_text_addr_max)
++			module_text_addr_max = (unsigned long)ret + size;
++		mutex_unlock(&module_mutex);
++	}
++	return ret;
++}
++
++#endif
++
+ static void *module_alloc_update_bounds(unsigned long size)
+ {
+ 	void *ret = module_alloc(size);
+@@ -2383,10 +2659,17 @@ static void *module_alloc_update_bounds(
+ 	if (ret) {
+ 		mutex_lock(&module_mutex);
+ 		/* Update module bounds. */
++#ifdef CONFIG_KRX
++		if ((unsigned long)ret < module_text_addr_min)
++			module_text_addr_min = (unsigned long)ret;
++		if ((unsigned long)ret + size > module_text_addr_max)
++			module_text_addr_max = (unsigned long)ret + size;
++#else
+ 		if ((unsigned long)ret < module_addr_min)
+ 			module_addr_min = (unsigned long)ret;
+ 		if ((unsigned long)ret + size > module_addr_max)
+ 			module_addr_max = (unsigned long)ret + size;
++#endif
+ 		mutex_unlock(&module_mutex);
+ 	}
+ 	return ret;
+@@ -2773,24 +3056,84 @@ static int find_module_sections(struct m
+ static int move_module(struct module *mod, struct load_info *info)
+ {
+ 	int i;
++#ifdef CONFIG_KRX
++	void *ptr, *text_ptr, *data_ptr, *ro_code_pointers_ptr,
++		     					*code_pointers_ptr;
++#else
+ 	void *ptr;
++#endif
+ 
+ 	/* Do the allocs. */
++#ifdef CONFIG_KRX
++	text_ptr = module_alloc_update_bounds(mod->core_text_size);
++	if (mod->core_ro_code_pointers_size)
++		ro_code_pointers_ptr = module_alloc_update_bounds_nx(
++					mod->core_ro_code_pointers_size);
++	if (mod->core_code_pointers_size)
++		code_pointers_ptr = module_alloc_update_bounds_nx(
++					mod->core_code_pointers_size);
++#else
+ 	ptr = module_alloc_update_bounds(mod->core_size);
++#endif
+ 	/*
+ 	 * The pointer to this block is stored in the module structure
+ 	 * which is inside the block. Just mark it as not being a
+ 	 * leak.
+ 	 */
++#ifdef CONFIG_KRX
++	kmemleak_not_leak(text_ptr);
++	if (!text_ptr || !ro_code_pointers_ptr || !code_pointers_ptr)
++#else
+ 	kmemleak_not_leak(ptr);
+ 	if (!ptr)
++#endif
+ 		return -ENOMEM;
+ 
++#ifdef CONFIG_KRX
++	krx_disable();
++	memset(text_ptr, 0, mod->core_text_size);
++	if (mod->core_ro_code_pointers_size) {
++		memset(ro_code_pointers_ptr, 0,
++				mod->core_ro_code_pointers_size);
++		mod->module_ro_code_pointers_core = ro_code_pointers_ptr;
++	}
++	if (mod->core_code_pointers_size) {
++		memset(code_pointers_ptr, 0,
++				mod->core_code_pointers_size);
++		mod->module_code_pointers_core = code_pointers_ptr;
++	}
++	krx_enable();
++	mod->module_text_core = text_ptr;
++#else
+ 	memset(ptr, 0, mod->core_size);
+ 	mod->module_core = ptr;
++#endif
++
++#ifdef CONFIG_KRX
++	/* Do the allocs. */
++	data_ptr = module_data_alloc_update_bounds(mod->core_data_size);
++	/*
++	 * The pointer to this block is stored in the module structure
++	 * which is inside the block. Just mark it as not being a
++	 * leak.
++	 */
++	kmemleak_not_leak(data_ptr);
++	if (!data_ptr) {
++		module_memfree(mod->module_text_core);
++		return -ENOMEM;
++	}
++
++	memset(data_ptr, 0, mod->core_data_size);
++	mod->module_data_core = data_ptr;
++#endif
+ 
+ 	if (mod->init_size) {
++#ifdef CONFIG_KRX
++		ptr = module_data_alloc_update_bounds(mod->init_size);
++		set_page_attributes(ptr, ptr + mod->init_size, set_memory_x);
++#else
+ 		ptr = module_alloc_update_bounds(mod->init_size);
++#endif
+ 		/*
+ 		 * The pointer to this block is stored in the module structure
+ 		 * which is inside the block. This block doesn't need to be
+@@ -2799,7 +3142,14 @@ static int move_module(struct module *mo
+ 		 */
+ 		kmemleak_ignore(ptr);
+ 		if (!ptr) {
++#ifdef CONFIG_KRX
++			module_memfree(mod->module_text_core);
++			module_memfree(mod->module_data_core);
++			module_memfree(mod->module_code_pointers_core);
++			module_memfree(mod->module_ro_code_pointers_core);
++#else
+ 			module_memfree(mod->module_core);
++#endif
+ 			return -ENOMEM;
+ 		}
+ 		memset(ptr, 0, mod->init_size);
+@@ -2812,6 +3162,9 @@ static int move_module(struct module *mo
+ 	for (i = 0; i < info->hdr->e_shnum; i++) {
+ 		void *dest;
+ 		Elf_Shdr *shdr = &info->sechdrs[i];
++#ifdef	CONFIG_KRX
++		const char *sname = info->secstrings + shdr->sh_name;
++#endif
+ 
+ 		if (!(shdr->sh_flags & SHF_ALLOC))
+ 			continue;
+@@ -2819,11 +3172,45 @@ static int move_module(struct module *mo
+ 		if (shdr->sh_entsize & INIT_OFFSET_MASK)
+ 			dest = mod->module_init
+ 				+ (shdr->sh_entsize & ~INIT_OFFSET_MASK);
+-		else
++		else {
++#ifdef CONFIG_KRX
++			if (shdr->sh_flags & SHF_EXECINSTR)
++				/* text */
++				dest = mod->module_text_core + shdr->sh_entsize;
++			else if (!is_code_pointer(sname) &&
++						!is_ro_code_pointer(sname))
++				/* data */
++				dest = mod->module_data_core + shdr->sh_entsize;
++			else if (is_code_pointer(sname))
++				dest = mod->module_code_pointers_core +
++							shdr->sh_entsize;
++			else
++				dest = mod->module_ro_code_pointers_core +
++							shdr->sh_entsize;
++
++#else
+ 			dest = mod->module_core + shdr->sh_entsize;
++#endif
++		}
+ 
+-		if (shdr->sh_type != SHT_NOBITS)
++		if (shdr->sh_type != SHT_NOBITS) {
++#ifdef CONFIG_KRX
++			if (shdr->sh_flags & SHF_EXECINSTR) {
++				/* text */
++				krx_memcpy(dest, (void *)shdr->sh_addr,
++							shdr->sh_size);
++			} else if (!is_code_pointer(sname) &&
++						!is_ro_code_pointer(sname)) {
++				memcpy(dest, (void *)shdr->sh_addr,
++							shdr->sh_size);
++			} else {
++				krx_memcpy(dest, (void *)shdr->sh_addr,
++							shdr->sh_size);
++			}
++#else
+ 			memcpy(dest, (void *)shdr->sh_addr, shdr->sh_size);
++#endif
++		}
+ 		/* Update sh_addr to point to copy in image. */
+ 		shdr->sh_addr = (unsigned long)dest;
+ 		pr_debug("\t0x%lx %s\n",
+@@ -2946,7 +3333,16 @@ static void module_deallocate(struct mod
+ 	percpu_modfree(mod);
+ 	module_arch_freeing_init(mod);
+ 	module_memfree(mod->module_init);
++#ifdef CONFIG_KRX
++	if (mod->core_ro_code_pointers_size)
++		module_memfree(mod->module_ro_code_pointers_core);
++	if (mod->core_code_pointers_size)
++		module_memfree(mod->module_code_pointers_core);
++	module_memfree(mod->module_text_core);
++	module_memfree(mod->module_data_core);
++#else
+ 	module_memfree(mod->module_core);
++#endif
+ }
+ 
+ int __weak module_finalize(const Elf_Ehdr *hdr,
+@@ -3198,10 +3594,35 @@ static int complete_formation(struct mod
+ 	module_bug_finalize(info->hdr, info->sechdrs, mod);
+ 
+ 	/* Set RO and NX regions for core */
++#ifdef CONFIG_KRX
++	set_core_section_ro(mod->module_text_core,
++				mod->module_data_core,
++				mod->module_ro_code_pointers_core,
++				mod->core_text_size,
++				mod->core_ro_size,
++				mod->core_data_size,
++				mod->core_ro_code_pointers_size);
++	/* Unmap text synonyms that exist in physmap */
++	handle_text_synonyms(KRX_CMD_KUNMAP,
++				mod->name,
++				mod->module_text_core,
++				mod->core_text_size);
++	if (mod->core_ro_code_pointers_size)
++		handle_text_synonyms(KRX_CMD_KUNMAP,
++					mod->name,
++					mod->module_ro_code_pointers_core,
++					mod->core_ro_code_pointers_size);
++	if (mod->core_code_pointers_size)
++		handle_text_synonyms(KRX_CMD_KUNMAP,
++					mod->name,
++					mod->module_code_pointers_core,
++					mod->core_code_pointers_size);
++#else
+ 	set_section_ro_nx(mod->module_core,
+ 				mod->core_text_size,
+ 				mod->core_ro_size,
+ 				mod->core_size);
++#endif
+ 
+ 	/* Set RO and NX regions for init */
+ 	set_section_ro_nx(mod->module_init,
+@@ -3359,6 +3780,22 @@ static int load_module(struct load_info
+ 	/* we can't deallocate the module until we clear memory protection */
+ 	unset_module_init_ro_nx(mod);
+ 	unset_module_core_ro_nx(mod);
++#ifdef CONFIG_KRX
++	handle_text_synonyms(KRX_CMD_KMAP,
++			mod->name,
++			mod->module_text_core,
++			mod->core_text_size);
++	if (mod->core_ro_code_pointers_size)
++		handle_text_synonyms(KRX_CMD_KMAP,
++				mod->name,
++				mod->module_ro_code_pointers_core,
++				mod->core_ro_code_pointers_size);
++	if (mod->core_code_pointers_size)
++		handle_text_synonyms(KRX_CMD_KMAP,
++				mod->name,
++				mod->module_code_pointers_core,
++				mod->core_code_pointers_size);
++#endif
+ 
+  ddebug_cleanup:
+ 	dynamic_debug_remove(info->debug);
+@@ -3457,7 +3894,11 @@ static const char *get_ksymbol(struct mo
+ 	if (within_module_init(addr, mod))
+ 		nextval = (unsigned long)mod->module_init+mod->init_text_size;
+ 	else
++#ifdef CONFIG_KRX
++		nextval = (unsigned long)mod->module_data_core;
++#else
+ 		nextval = (unsigned long)mod->module_core+mod->core_text_size;
++#endif
+ 
+ 	/* Scan for closest preceding symbol, and next symbol. (ELF
+ 	   starts real symbols at 1). */
+@@ -3704,8 +4145,13 @@ static int m_show(struct seq_file *m, vo
+ 	if (mod->state == MODULE_STATE_UNFORMED)
+ 		return 0;
+ 
++#ifdef CONFIG_KRX
++	seq_printf(m, "%s %u", mod->name,
++		mod->init_size + mod->core_text_size + mod->core_data_size);
++#else
+ 	seq_printf(m, "%s %u",
+ 		   mod->name, mod->init_size + mod->core_size);
++#endif
+ 	print_unload_info(m, mod);
+ 
+ 	/* Informative for users. */
+@@ -3714,7 +4160,13 @@ static int m_show(struct seq_file *m, vo
+ 		   mod->state == MODULE_STATE_COMING ? "Loading" :
+ 		   "Live");
+ 	/* Used by oprofile and other similar tools. */
++#ifdef CONFIG_KRX
++	seq_printf(m, " 0x%pK 0x%pK",
++			mod->module_text_core,
++			mod->module_data_core);
++#else
+ 	seq_printf(m, " 0x%pK", mod->module_core);
++#endif
+ 
+ 	/* Taints info */
+ 	if (mod->taints)
+@@ -3811,7 +4263,12 @@ struct module *__module_address(unsigned
+ {
+ 	struct module *mod;
+ 
++#ifdef CONFIG_KRX
++	if ((addr < module_text_addr_min || addr > module_text_addr_max) &&
++		(addr < module_data_addr_min || addr > module_data_addr_max))
++#else
+ 	if (addr < module_addr_min || addr > module_addr_max)
++#endif
+ 		return NULL;
+ 
+ 	list_for_each_entry_rcu(mod, &modules, list) {
+@@ -3855,9 +4312,15 @@ struct module *__module_text_address(uns
+ 	struct module *mod = __module_address(addr);
+ 	if (mod) {
+ 		/* Make sure it's within the text section. */
++#ifdef CONFIG_KRX
++		if (!within(addr, mod->module_init, mod->init_text_size) &&
++		!within(addr, mod->module_text_core, mod->core_text_size))
++			mod = NULL;
++#else
+ 		if (!within(addr, mod->module_init, mod->init_text_size)
+ 		    && !within(addr, mod->module_core, mod->core_text_size))
+ 			mod = NULL;
++#endif
+ 	}
+ 	return mod;
+ }
+diff -uprN linux-3.19/kernel/static_key.c linux-3.19-krx/kernel/static_key.c
+--- linux-3.19/kernel/static_key.c	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.19-krx/kernel/static_key.c	2017-07-23 16:03:42.264993249 -0400
+@@ -0,0 +1,16 @@
++#include <linux/jump_label.h>
++
++#ifdef	CONFIG_KRX
++noinline int static_key_count(struct static_key *key)
++{
++	return atomic_read(&key->enabled);
++}
++EXPORT_SYMBOL(static_key_count);
++
++#if defined(CC_HAVE_ASM_GOTO) && defined(CONFIG_JUMP_LABEL)
++noinline struct jump_entry *krx_get_key_entries(struct static_key *key)
++{
++	return key->entries;
++}
++#endif
++#endif
+diff -uprN linux-3.19/kernel/time/timekeeping.c linux-3.19-krx/kernel/time/timekeeping.c
+--- linux-3.19/kernel/time/timekeeping.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/time/timekeeping.c	2017-07-23 17:01:08.381124488 -0400
+@@ -459,7 +459,7 @@ static void timekeeping_update(struct ti
+ 	update_pvclock_gtod(tk, action & TK_CLOCK_WAS_SET);
+ 
+ 	if (action & TK_MIRROR)
+-		memcpy(&shadow_timekeeper, &tk_core.timekeeper,
++		krx_memcpy(&shadow_timekeeper, &tk_core.timekeeper,
+ 		       sizeof(tk_core.timekeeper));
+ 
+ 	update_fast_timekeeper(tk);
+diff -uprN linux-3.19/kernel/tracepoint.c linux-3.19-krx/kernel/tracepoint.c
+--- linux-3.19/kernel/tracepoint.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/kernel/tracepoint.c	2017-07-23 17:04:18.865133660 -0400
+@@ -114,7 +114,8 @@ static struct tracepoint_func *func_add(
+ 	if (new == NULL)
+ 		return ERR_PTR(-ENOMEM);
+ 	if (old)
+-		memcpy(new, old, nr_probes * sizeof(struct tracepoint_func));
++		krx_memcpy(new, old,
++				nr_probes * sizeof(struct tracepoint_func));
+ 	new[nr_probes] = *tp_func;
+ 	new[nr_probes + 1].func = NULL;
+ 	*funcs = new;
+@@ -170,6 +171,29 @@ static void *func_remove(struct tracepoi
+ 	return old;
+ }
+ 
++typedef void (*Regfunc)(void);
++typedef void (*Unregfunc)(void);
++
++noinline Regfunc krx_get_tp_regfunc(struct tracepoint *tp)
++{
++	return tp->regfunc;
++}
++
++noinline Unregfunc krx_get_tp_unregfunc(struct tracepoint *tp)
++{
++	return tp->unregfunc;
++}
++
++noinline struct static_key *krx_get_tp_key(struct tracepoint *tp)
++{
++	return &tp->key;
++}
++
++noinline struct tracepoint_func *krx_get_tp_funcs(struct tracepoint *tp)
++{
++	return tp->funcs;
++}
++
+ /*
+  * Add the probe function to a tracepoint.
+  */
+@@ -177,11 +201,14 @@ static int tracepoint_add_func(struct tr
+ 		struct tracepoint_func *func)
+ {
+ 	struct tracepoint_func *old, *tp_funcs;
++	Regfunc regfunc = krx_get_tp_regfunc(tp);
++	struct tracepoint_func *orig_tp_funcs = krx_get_tp_funcs(tp);
++	struct static_key *key = krx_get_tp_key(tp);
+ 
+-	if (tp->regfunc && !static_key_enabled(&tp->key))
+-		tp->regfunc();
++	if (regfunc && !static_key_enabled(key))
++		regfunc();
+ 
+-	tp_funcs = rcu_dereference_protected(tp->funcs,
++	tp_funcs = rcu_dereference_protected(orig_tp_funcs,
+ 			lockdep_is_held(&tracepoints_mutex));
+ 	old = func_add(&tp_funcs, func);
+ 	if (IS_ERR(old)) {
+@@ -197,8 +224,8 @@ static int tracepoint_add_func(struct tr
+ 	 * is used.
+ 	 */
+ 	rcu_assign_pointer(tp->funcs, tp_funcs);
+-	if (!static_key_enabled(&tp->key))
+-		static_key_slow_inc(&tp->key);
++	if (!static_key_enabled(key))
++		static_key_slow_inc(key);
+ 	release_probes(old);
+ 	return 0;
+ }
+@@ -213,8 +240,11 @@ static int tracepoint_remove_func(struct
+ 		struct tracepoint_func *func)
+ {
+ 	struct tracepoint_func *old, *tp_funcs;
++	struct tracepoint_func *orig_tp_funcs = krx_get_tp_funcs(tp);
++	Unregfunc tp_unregfunc;
++	struct static_key *key;
+ 
+-	tp_funcs = rcu_dereference_protected(tp->funcs,
++	tp_funcs = rcu_dereference_protected(orig_tp_funcs,
+ 			lockdep_is_held(&tracepoints_mutex));
+ 	old = func_remove(&tp_funcs, func);
+ 	if (IS_ERR(old)) {
+@@ -223,12 +253,14 @@ static int tracepoint_remove_func(struct
+ 	}
+ 
+ 	if (!tp_funcs) {
++		tp_unregfunc = krx_get_tp_unregfunc(tp);
++		key = krx_get_tp_key(tp);
+ 		/* Removed last function */
+-		if (tp->unregfunc && static_key_enabled(&tp->key))
+-			tp->unregfunc();
++		if (tp_unregfunc && static_key_enabled(key))
++			tp_unregfunc();
+ 
+-		if (static_key_enabled(&tp->key))
+-			static_key_slow_dec(&tp->key);
++		if (static_key_enabled(key))
++			static_key_slow_dec(key);
+ 	}
+ 	rcu_assign_pointer(tp->funcs, tp_funcs);
+ 	release_probes(old);
+diff -uprN linux-3.19/lib/cpumask.c linux-3.19-krx/lib/cpumask.c
+--- linux-3.19/lib/cpumask.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/lib/cpumask.c	2017-07-23 16:03:52.884993653 -0400
+@@ -227,3 +227,16 @@ out:
+ 	return ret;
+ }
+ EXPORT_SYMBOL(cpumask_set_cpu_local_first);
++
++#if defined(CONFIG_KRX) && defined(CONFIG_X86_64)
++void krx_cpumask_copy(struct cpumask *dstp, const struct cpumask *srcp)
++{
++	if (small_const_nbits(nr_cpumask_bits))
++		*cpumask_bits(dstp) = *cpumask_bits(srcp);
++	else
++		krx_memcpy(cpumask_bits(dstp),
++			cpumask_bits(srcp),
++			BITS_TO_LONGS(nr_cpumask_bits) * sizeof(unsigned long));
++}
++EXPORT_SYMBOL(krx_cpumask_copy);
++#endif
+diff -uprN linux-3.19/lib/decompress_inflate.c linux-3.19-krx/lib/decompress_inflate.c
+--- linux-3.19/lib/decompress_inflate.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/lib/decompress_inflate.c	2017-07-23 16:54:07.797108959 -0400
+@@ -166,7 +166,6 @@ STATIC int INIT gunzip(unsigned char *bu
+ 	if (pos)
+ 		/* add + 8 to skip over trailer */
+ 		*pos = strm->next_in - zbuf+8;
+-
+ gunzip_5:
+ 	free(strm->workspace);
+ gunzip_nomem4:
+diff -uprN linux-3.19/lib/string.c linux-3.19-krx/lib/string.c
+--- linux-3.19/lib/string.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/lib/string.c	2017-07-23 17:04:39.705132376 -0400
+@@ -26,6 +26,7 @@
+ #include <linux/export.h>
+ #include <linux/bug.h>
+ #include <linux/errno.h>
++#include <asm/desc.h>
+ 
+ #ifndef __HAVE_ARCH_STRNCASECMP
+ /**
+@@ -636,6 +637,24 @@ void *memcpy(void *dest, const void *src
+ EXPORT_SYMBOL(memcpy);
+ #endif
+ 
++#ifdef CONFIG_KRX
++void *krx_memcpy(void *dst, const void *src, size_t len)
++{
++	char *tmp = dst;
++	const char *s = src;
++
++	krx_disable();
++
++	while (len--)
++		*tmp++ = *s++;
++
++	krx_enable();
++
++	return dst;
++}
++EXPORT_SYMBOL(krx_memcpy);
++#endif
++
+ #ifndef __HAVE_ARCH_MEMMOVE
+ /**
+  * memmove - Copy one area of memory to another
+@@ -689,6 +708,25 @@ __visible int memcmp(const void *cs, con
+ EXPORT_SYMBOL(memcmp);
+ #endif
+ 
++#ifdef CONFIG_KRX
++__visible int krx_memcmp(const void *cs, const void *ct, size_t count)
++{
++	const unsigned char *su1, *su2;
++	int res = 0;
++
++	krx_disable();
++
++	for (su1 = cs, su2 = ct; 0 < count; ++su1, ++su2, count--)
++		if ((res = *su1 - *su2) != 0)
++			break;
++
++	krx_enable();
++
++	return res;
++}
++EXPORT_SYMBOL(krx_memcmp);
++#endif
++
+ #ifndef __HAVE_ARCH_MEMSCAN
+ /**
+  * memscan - Find a character in an area of memory.
+diff -uprN linux-3.19/Makefile linux-3.19-krx/Makefile
+--- linux-3.19/Makefile	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/Makefile	2017-07-23 16:03:18.000992327 -0400
+@@ -403,7 +403,8 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstric
+ 		   -fno-strict-aliasing -fno-common \
+ 		   -Werror-implicit-function-declaration \
+ 		   -Wno-format-security \
+-		   -std=gnu89
++		   -std=gnu89 -ffixed-r10 -fno-if-conversion \
++		   -fno-if-conversion2
+ 
+ KBUILD_AFLAGS_KERNEL :=
+ KBUILD_CFLAGS_KERNEL :=
+diff -uprN linux-3.19/mm/maccess.c linux-3.19-krx/mm/maccess.c
+--- linux-3.19/mm/maccess.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/mm/maccess.c	2017-07-23 16:03:43.852993310 -0400
+@@ -4,6 +4,7 @@
+ #include <linux/export.h>
+ #include <linux/mm.h>
+ #include <linux/uaccess.h>
++#include <asm/desc.h>
+ 
+ /**
+  * probe_kernel_read(): safely attempt to read from a location
+@@ -25,8 +26,12 @@ long __probe_kernel_read(void *dst, cons
+ 
+ 	set_fs(KERNEL_DS);
+ 	pagefault_disable();
++	
++	krx_disable();
+ 	ret = __copy_from_user_inatomic(dst,
+ 			(__force const void __user *)src, size);
++	krx_enable();
++
+ 	pagefault_enable();
+ 	set_fs(old_fs);
+ 
+@@ -53,7 +58,11 @@ long __probe_kernel_write(void *dst, con
+ 
+ 	set_fs(KERNEL_DS);
+ 	pagefault_disable();
++	
++	krx_disable();
+ 	ret = __copy_to_user_inatomic((__force void __user *)dst, src, size);
++	krx_enable();
++	
+ 	pagefault_enable();
+ 	set_fs(old_fs);
+ 
+diff -uprN linux-3.19/mm/vmalloc.c linux-3.19-krx/mm/vmalloc.c
+--- linux-3.19/mm/vmalloc.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/mm/vmalloc.c	2017-07-23 16:03:43.508993297 -0400
+@@ -215,7 +215,12 @@ int is_vmalloc_or_module_addr(const void
+ 	 */
+ #if defined(CONFIG_MODULES) && defined(MODULES_VADDR)
+ 	unsigned long addr = (unsigned long)x;
++#ifdef CONFIG_KRX
++	if ((addr >= MODULES_VADDR && addr < MODULES_END) ||
++		(addr >= MODULES_DATA_VADDR && addr < MODULES_DATA_END))
++#else
+ 	if (addr >= MODULES_VADDR && addr < MODULES_END)
++#endif
+ 		return 1;
+ #endif
+ 	return is_vmalloc_addr(x);
+diff -uprN linux-3.19/net/ipv4/netfilter/ip_tables.c linux-3.19-krx/net/ipv4/netfilter/ip_tables.c
+--- linux-3.19/net/ipv4/netfilter/ip_tables.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/net/ipv4/netfilter/ip_tables.c	2017-07-23 16:03:51.884993616 -0400
+@@ -870,7 +870,7 @@ translate_table(struct net *net, struct
+ 	/* And one copy for every other CPU */
+ 	for_each_possible_cpu(i) {
+ 		if (newinfo->entries[i] && newinfo->entries[i] != entry0)
+-			memcpy(newinfo->entries[i], entry0, newinfo->size);
++			krx_memcpy(newinfo->entries[i], entry0, newinfo->size);
+ 	}
+ 
+ 	return ret;
+diff -uprN linux-3.19/net/ipv6/netfilter/ip6_tables.c linux-3.19-krx/net/ipv6/netfilter/ip6_tables.c
+--- linux-3.19/net/ipv6/netfilter/ip6_tables.c	2015-02-08 21:54:22.000000000 -0500
++++ linux-3.19-krx/net/ipv6/netfilter/ip6_tables.c	2017-07-23 16:03:51.368993596 -0400
+@@ -880,7 +880,7 @@ translate_table(struct net *net, struct
+ 	/* And one copy for every other CPU */
+ 	for_each_possible_cpu(i) {
+ 		if (newinfo->entries[i] && newinfo->entries[i] != entry0)
+-			memcpy(newinfo->entries[i], entry0, newinfo->size);
++			krx_memcpy(newinfo->entries[i], entry0, newinfo->size);
+ 	}
+ 
+ 	return ret;
