@@ -3163,7 +3163,7 @@ diff -uprN linux-3.19/kernel/Makefile linux-3.19-krx/kernel/Makefile
  # Do not trace debug files and internal ftrace files
 diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
 --- linux-3.19/kernel/module.c	2015-02-08 21:54:22.000000000 -0500
-+++ linux-3.19-krx/kernel/module.c	2017-07-23 17:00:04.017120832 -0400
++++ linux-3.19-krx/kernel/module.c	2017-08-20 12:17:33.521686844 -0400
 @@ -62,6 +62,8 @@
  #include <uapi/linux/module.h>
  #include "module-internal.h"
@@ -3604,7 +3604,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  		mutex_unlock(&module_mutex);
  	}
  	return ret;
-@@ -2773,24 +3056,84 @@ static int find_module_sections(struct m
+@@ -2773,24 +3056,85 @@ static int find_module_sections(struct m
  static int move_module(struct module *mod, struct load_info *info)
  {
  	int i;
@@ -3634,7 +3634,8 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  	 */
 +#ifdef CONFIG_KRX
 +	kmemleak_not_leak(text_ptr);
-+	if (!text_ptr || !ro_code_pointers_ptr || !code_pointers_ptr)
++	if (!text_ptr || (mod->core_ro_code_pointers_size && !ro_code_pointers_ptr)
++		       	|| (mod->core_code_pointers_size && !code_pointers_ptr))
 +#else
  	kmemleak_not_leak(ptr);
  	if (!ptr)
@@ -3689,7 +3690,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  		/*
  		 * The pointer to this block is stored in the module structure
  		 * which is inside the block. This block doesn't need to be
-@@ -2799,7 +3142,14 @@ static int move_module(struct module *mo
+@@ -2799,7 +3143,14 @@ static int move_module(struct module *mo
  		 */
  		kmemleak_ignore(ptr);
  		if (!ptr) {
@@ -3704,7 +3705,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  			return -ENOMEM;
  		}
  		memset(ptr, 0, mod->init_size);
-@@ -2812,6 +3162,9 @@ static int move_module(struct module *mo
+@@ -2812,6 +3163,9 @@ static int move_module(struct module *mo
  	for (i = 0; i < info->hdr->e_shnum; i++) {
  		void *dest;
  		Elf_Shdr *shdr = &info->sechdrs[i];
@@ -3714,7 +3715,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  
  		if (!(shdr->sh_flags & SHF_ALLOC))
  			continue;
-@@ -2819,11 +3172,45 @@ static int move_module(struct module *mo
+@@ -2819,11 +3173,45 @@ static int move_module(struct module *mo
  		if (shdr->sh_entsize & INIT_OFFSET_MASK)
  			dest = mod->module_init
  				+ (shdr->sh_entsize & ~INIT_OFFSET_MASK);
@@ -3762,7 +3763,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  		/* Update sh_addr to point to copy in image. */
  		shdr->sh_addr = (unsigned long)dest;
  		pr_debug("\t0x%lx %s\n",
-@@ -2946,7 +3333,16 @@ static void module_deallocate(struct mod
+@@ -2946,7 +3334,16 @@ static void module_deallocate(struct mod
  	percpu_modfree(mod);
  	module_arch_freeing_init(mod);
  	module_memfree(mod->module_init);
@@ -3779,7 +3780,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  }
  
  int __weak module_finalize(const Elf_Ehdr *hdr,
-@@ -3198,10 +3594,35 @@ static int complete_formation(struct mod
+@@ -3198,10 +3595,35 @@ static int complete_formation(struct mod
  	module_bug_finalize(info->hdr, info->sechdrs, mod);
  
  	/* Set RO and NX regions for core */
@@ -3815,7 +3816,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  
  	/* Set RO and NX regions for init */
  	set_section_ro_nx(mod->module_init,
-@@ -3359,6 +3780,22 @@ static int load_module(struct load_info
+@@ -3359,6 +3781,22 @@ static int load_module(struct load_info
  	/* we can't deallocate the module until we clear memory protection */
  	unset_module_init_ro_nx(mod);
  	unset_module_core_ro_nx(mod);
@@ -3838,7 +3839,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  
   ddebug_cleanup:
  	dynamic_debug_remove(info->debug);
-@@ -3457,7 +3894,11 @@ static const char *get_ksymbol(struct mo
+@@ -3457,7 +3895,11 @@ static const char *get_ksymbol(struct mo
  	if (within_module_init(addr, mod))
  		nextval = (unsigned long)mod->module_init+mod->init_text_size;
  	else
@@ -3850,7 +3851,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  
  	/* Scan for closest preceding symbol, and next symbol. (ELF
  	   starts real symbols at 1). */
-@@ -3704,8 +4145,13 @@ static int m_show(struct seq_file *m, vo
+@@ -3704,8 +4146,13 @@ static int m_show(struct seq_file *m, vo
  	if (mod->state == MODULE_STATE_UNFORMED)
  		return 0;
  
@@ -3864,7 +3865,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  	print_unload_info(m, mod);
  
  	/* Informative for users. */
-@@ -3714,7 +4160,13 @@ static int m_show(struct seq_file *m, vo
+@@ -3714,7 +4161,13 @@ static int m_show(struct seq_file *m, vo
  		   mod->state == MODULE_STATE_COMING ? "Loading" :
  		   "Live");
  	/* Used by oprofile and other similar tools. */
@@ -3878,7 +3879,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  
  	/* Taints info */
  	if (mod->taints)
-@@ -3811,7 +4263,12 @@ struct module *__module_address(unsigned
+@@ -3811,7 +4264,12 @@ struct module *__module_address(unsigned
  {
  	struct module *mod;
  
@@ -3891,7 +3892,7 @@ diff -uprN linux-3.19/kernel/module.c linux-3.19-krx/kernel/module.c
  		return NULL;
  
  	list_for_each_entry_rcu(mod, &modules, list) {
-@@ -3855,9 +4312,15 @@ struct module *__module_text_address(uns
+@@ -3855,9 +4313,15 @@ struct module *__module_text_address(uns
  	struct module *mod = __module_address(addr);
  	if (mod) {
  		/* Make sure it's within the text section. */

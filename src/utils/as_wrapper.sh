@@ -31,7 +31,7 @@ do
 			asmfile="/tmp/$(echo ${array[$outname]} | \
 							sed -e 's/\//_/g')_2"
 			/usr/bin/awk -v outname="$asmfile" 		\
-					-f $REPO_DIR/src/utils/move_jump_tables.awk -
+					-f REPO_DIR/src/utils/move_jump_tables.awk -
 			array[$eof]="$asmfile"
 			/usr/bin/as.old "${array[@]}"
 			rm "$asmfile"

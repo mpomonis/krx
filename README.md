@@ -32,21 +32,23 @@ To use kR^X you need to follow the instructions below (we assume a Debian/Linux
 distribution):
 
 	[0.1] Download and untar the Linux kernel v3.19
-		wget linux-3.19.tar.gz
+		wget https://www.kernel.org/pub/linux/kernel/v3.x/linux-3.19.tar.gz
 		tar xfz linux-3.19.tar.gz
 	
-	[0.2] Export the location of this repo
-		export REPO_DIR="/home/marios/krx"
+	[0.2] Update the location of the repo (for the rest of this document we
+assume that the repo was deployed in `/home/marios/krx')
+		sed -i.bak 's/REPO_DIR/\/home\/marios\/krx/' /home/marios/krx/src/utils/as_wrapper.sh
 
 	[1] Patch the Linux kernel
 		cd linux-3.19
-		patch -p1 < $REPO_DIR/src/linux-3.19-krx.patch
+		patch -p1 < /home/marios/krx/src/linux-3.19-krx.patch
 
 	[2] Setup the `as' wrapper
-		sudo mv /usr/bin/as /usr/bin/as.old && sudo ln -s $REPO_DIR/src/utils/as_wrapper.sh /usr/bin/as
+		sudo mv /usr/bin/as /usr/bin/as.old && sudo ln -s /home/marios/krx/src/utils/as_wrapper.sh /usr/bin/as
 	
-	[3] Configure the kernel (in this example we use `config-3.19-amd64.krx.deb' which is similar to the default Debian config file)
-		cp $REPO_DIR/src/configs/config-3.19-amd64.krx.deb ./.config
+	[3] Configure the kernel (in this example we use
+`config-3.19-amd64.krx.deb' which is similar to the default Debian config file)
+		cp /home/marios/krx/src/configs/config-3.19-amd64.krx.deb ./.config
 		make oldconfig
 	
 	[4] Build the kernel
