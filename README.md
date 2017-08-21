@@ -35,8 +35,7 @@ distribution):
 		wget https://www.kernel.org/pub/linux/kernel/v3.x/linux-3.19.tar.gz
 		tar xfz linux-3.19.tar.gz
 	
-	[0.2] Update the location of the repo (for the rest of this document we
-assume that the repo was deployed in `/home/marios/krx')
+	[0.2] Update the location of the repo (for the rest of this document we assume that the repo was deployed in `/home/marios/krx')
 		sed -i.bak 's/REPO_DIR/\/home\/marios\/krx/' /home/marios/krx/src/utils/as_wrapper.sh
 
 	[1] Patch the Linux kernel
@@ -46,8 +45,7 @@ assume that the repo was deployed in `/home/marios/krx')
 	[2] Setup the `as' wrapper
 		sudo mv /usr/bin/as /usr/bin/as.old && sudo ln -s /home/marios/krx/src/utils/as_wrapper.sh /usr/bin/as
 	
-	[3] Configure the kernel (in this example we use
-`config-3.19-amd64.krx.deb' which is similar to the default Debian config file)
+	[3] Configure the kernel (in this example we use `config-3.19-amd64.krx.deb' which is similar to the default Debian config file)
 		cp /home/marios/krx/src/configs/config-3.19-amd64.krx.deb ./.config
 		make oldconfig
 	
